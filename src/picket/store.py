@@ -93,6 +93,19 @@ def read_json(path: Path) -> Any:
     return json.loads(path.read_text())
 
 
+def append_jsonl(path: Path, obj: Any) -> None:
+    """Append one JSON record + newline (single-writer append-only log)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as f:
+        f.write(json.dumps(obj) + "\n")
+
+
+def read_jsonl(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+
 def write_watch(state: WatchState) -> None:
     write_json_atomic(watch_path(state.watch_id), state.model_dump())
 
