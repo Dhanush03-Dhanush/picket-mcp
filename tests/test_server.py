@@ -1,5 +1,7 @@
 import asyncio
+import os
 
+import psutil
 from fastmcp import Client
 
 from picket.server import mcp
@@ -41,3 +43,43 @@ def test_test_predicate_tool_rejects_bad_spec():
         "error_code": "INVALID_SPEC",
         "message": result.data["message"],
     }
+
+
+def test_v0_walking_skeleton_end_to_end(home, monkeypatch):
+    """register -> arm -> list -> get -> stop, end to end across the MCP tools."""
+    from picket import condition, daemon, store
+
+    d = home / "runbooks" / "notify"
+    d.mkdir(parents=True)
+    (d / "run.sh").write_text("#!/bin/sh\nexit 0\n")
+
+    monkeypatch.setattr(condition, "fetch", lambda ep, **k: {"last": 4850})
+
+    def fake_spawn(watch_id):
+        st = store.read_watch(watch_id)
+        st.pid = os.getpid()
+        st.pgid = os.getpgid(os.getpid())
+        st.proc_create_time = psutil.Process().create_time()
+        store.write_watch(st)
+
+    monkeypatch.setattr(daemon, "spawn", fake_spawn)
+
+    assert _call(
+        "register_runbook", runbook_id="notify", runbook_type="exec", entry="run.sh"
+    ).data["ok"]
+
+    armed = _call(
+        "arm_watch",
+        runbook_id="notify",
+        endpoint={"url": "https://x/spx"},
+        predicate={"path": "$.last", "op": "lt", "value": 4800},
+        cadence={"interval_seconds": 30},
+    ).data
+    assert armed["ok"]
+    watch_id = armed["watch_id"]
+
+    listed = _call("list_watches").data["watches"]
+    assert len(listed) == 1 and listed[0]["alive"]
+
+    assert _call("get_watch", watch_id=watch_id).data["watch"]["watch_id"] == watch_id
+    assert _call("stop_watch", watch_id=watch_id).data["final_status"] == "stopped"

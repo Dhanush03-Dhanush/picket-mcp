@@ -115,3 +115,20 @@ def read_watch(watch_id: str) -> WatchState | None:
     if not path.exists():
         return None
     return WatchState.model_validate(read_json(path))
+
+
+def write_control(watch_id: str, command: str) -> None:
+    """Server-owned channel: drop a one-word command for the daemon to read+clear."""
+    path = control_path(watch_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(command)
+
+
+def read_control(watch_id: str) -> str | None:
+    """Daemon side: read and clear the control command (None if absent)."""
+    path = control_path(watch_id)
+    if not path.exists():
+        return None
+    command = path.read_text().strip()
+    path.unlink()
+    return command or None

@@ -74,6 +74,10 @@ def run(
 
     n = 0
     while iterations is None or n < iterations:
+        if store.read_control(watch_id) == "stop":
+            state.status = "stopped"
+            store.write_watch(state)
+            return
         poll_once(state)
         n += 1
         if iterations is None or n < iterations:
