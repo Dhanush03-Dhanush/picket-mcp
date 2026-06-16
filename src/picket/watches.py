@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import signal
 import time
+from datetime import UTC, datetime
 
 import psutil
 
@@ -45,6 +46,20 @@ def is_alive(state: WatchState) -> bool:
     return True
 
 
+def _heartbeat_stale(state: WatchState) -> bool:
+    if state.heartbeat_at is None:
+        return False  # just armed; the daemon hasn't ticked yet
+    age = (datetime.now(UTC) - datetime.fromisoformat(state.heartbeat_at)).total_seconds()
+    return age > max(60, 3 * state.cadence.interval_seconds)
+
+
+def effective_status(state: WatchState) -> str:
+    """Report 'errored' for an active watch whose daemon died or went stale (§12 crash recovery)."""
+    if state.status == "active" and (not is_alive(state) or _heartbeat_stale(state)):
+        return "errored"
+    return state.status
+
+
 def _await_identity(
     watch_id: str, timeout: float = 5.0, interval: float = 0.05
 ) -> WatchState | None:
@@ -69,6 +84,9 @@ def arm_watch(
     ttl_seconds: float | None = None,
     debounce_seconds: float = 0,
     cooldown_seconds: float = 0,
+    max_retries: int = 0,
+    drift_policy: str = "block",
+    notify_runbook: str | None = None,
 ) -> dict:
     """Validate, trial-observe, persist, and spawn a detached daemon for one watch."""
     try:
@@ -105,6 +123,9 @@ def arm_watch(
             ttl_seconds=ttl_seconds,
             debounce_seconds=debounce_seconds,
             cooldown_seconds=cooldown_seconds,
+            max_retries=max_retries,
+            drift_policy=drift_policy,
+            notify_runbook=notify_runbook,
         )
     )
 
@@ -132,13 +153,16 @@ def list_watches(status_filter: str = "all") -> dict:
     rows = []
     for path in sorted((store.picket_home() / "watches").glob("*.json")):
         state = store.read_watch(path.stem)
-        if state is None or (status_filter != "all" and state.status != status_filter):
+        if state is None:
+            continue
+        status = effective_status(state)
+        if status_filter != "all" and status != status_filter:
             continue
         rows.append(
             {
                 "watch_id": state.watch_id,
                 "label": state.label,
-                "status": state.status,
+                "status": status,
                 "runbook_id": state.runbook_id,
                 "cadence_summary": f"every {state.cadence.interval_seconds:g}s",
                 "fire_count": state.fire_count,
@@ -162,6 +186,7 @@ def get_watch(watch_id: str, log_lines: int = 20) -> dict:
         "ok": True,
         "watch": state.model_dump(),
         "alive": is_alive(state),
+        "effective_status": effective_status(state),
         "most_recent_fire": fires[-1] if fires else None,
         "log_tail": tail,
     }
@@ -212,3 +237,19 @@ def stop_watch(watch_id: str, mode: str = "graceful") -> dict:
     state.status = "stopped"
     store.write_watch(state)
     return {"ok": True, "final_status": "stopped", "handler_was_in_flight": in_flight}
+
+
+def stop_all_watches(
+    confirm: bool = False, status_filter: str = "active", mode: str = "graceful"
+) -> dict:
+    """Bulk stop. Requires confirm=true (PERMISSION_REQUIRED otherwise)."""
+    if not confirm:
+        return failure(ErrorCode.PERMISSION_REQUIRED, "stop_all_watches requires confirm=true")
+    stopped, failures = [], []
+    for path in sorted((store.picket_home() / "watches").glob("*.json")):
+        state = store.read_watch(path.stem)
+        if state is None or (status_filter != "all" and state.status != status_filter):
+            continue
+        result = stop_watch(state.watch_id, mode)
+        (stopped if result.get("ok") else failures).append(state.watch_id)
+    return {"ok": True, "stopped_count": len(stopped), "watch_ids": stopped, "failures": failures}

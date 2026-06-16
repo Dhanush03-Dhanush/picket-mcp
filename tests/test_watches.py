@@ -191,6 +191,32 @@ def test_verify_before_kill_rejects_reused_pid(home):
     assert watches.is_alive(state) is False  # create_time mismatch => not our process
 
 
+def test_effective_status_reports_errored_for_dead_daemon(home):
+    # active watch whose recorded pid is gone => reported errored
+    store.write_watch(_state("wch_e", status="active", pid=999999, proc_create_time=1.0))
+    assert watches.effective_status(store.read_watch("wch_e")) == "errored"
+    listed = watches.list_watches()["watches"]
+    assert listed[0]["status"] == "errored"
+    assert watches.list_watches(status_filter="errored")["watches"][0]["watch_id"] == "wch_e"
+    assert watches.list_watches(status_filter="active")["watches"] == []
+
+
+def test_stop_all_watches_requires_confirm(home):
+    assert watches.stop_all_watches()["error_code"] == "PERMISSION_REQUIRED"
+
+
+def test_stop_all_watches_stops_active(home, monkeypatch):
+    _register_runbook(home)
+    monkeypatch.setattr(condition, "fetch", lambda ep, **k: {"last": 4850})
+    _fake_spawn(monkeypatch)
+    watches.arm_watch(runbook_id="rb", endpoint=EP, predicate=PR, cadence=CAD)
+    watches.arm_watch(runbook_id="rb", endpoint=EP, predicate=PR, cadence=CAD)
+
+    res = watches.stop_all_watches(confirm=True)
+    assert res["stopped_count"] == 2 and res["failures"] == []
+    assert watches.list_watches(status_filter="stopped")["watches"]
+
+
 def test_stop_watch_immediate_kills_real_process_group(home):
     proc = subprocess.Popen(
         [sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True

@@ -75,6 +75,13 @@ def list_runbooks() -> dict:
 
 
 @mcp.tool
+def install_default_runbooks() -> dict:
+    """Install + register the shipped default macOS-notification runbook (picket-notify)."""
+    rb = runbooks.install_default_notify_runbook()
+    return {"ok": True, **rb.model_dump()}
+
+
+@mcp.tool
 def arm_watch(
     runbook_id: str,
     endpoint: dict,
@@ -85,6 +92,9 @@ def arm_watch(
     ttl_seconds: float | None = None,
     debounce_seconds: float = 0,
     cooldown_seconds: float = 0,
+    max_retries: int = 0,
+    drift_policy: str = "block",
+    notify_runbook: str | None = None,
 ) -> dict:
     """Arm a watcher and spawn its detached daemon, then return immediately.
 
@@ -101,6 +111,9 @@ def arm_watch(
         ttl_seconds=ttl_seconds,
         debounce_seconds=debounce_seconds,
         cooldown_seconds=cooldown_seconds,
+        max_retries=max_retries,
+        drift_policy=drift_policy,
+        notify_runbook=notify_runbook,
     )
 
 
@@ -120,6 +133,14 @@ def get_watch(watch_id: str, log_lines: int = 20) -> dict:
 def stop_watch(watch_id: str, mode: str = "graceful") -> dict:
     """Stop a watch (graceful via control file, or immediate SIGTERM). Idempotent."""
     return watches.stop_watch(watch_id, mode)
+
+
+@mcp.tool
+def stop_all_watches(
+    confirm: bool = False, status_filter: str = "active", mode: str = "graceful"
+) -> dict:
+    """Bulk-stop watches. Requires confirm=true (else PERMISSION_REQUIRED)."""
+    return watches.stop_all_watches(confirm, status_filter, mode)
 
 
 @mcp.tool

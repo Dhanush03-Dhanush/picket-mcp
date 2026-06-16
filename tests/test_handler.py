@@ -2,7 +2,7 @@ from picket import handler, runbooks, store
 from picket.models import CadenceSpec, EndpointSpec, PredicateSpec, WatchState
 
 
-def _state(runbook_id="rb"):
+def _state(runbook_id="rb", **kw):
     return WatchState(
         watch_id="wch_1",
         runbook_id=runbook_id,
@@ -10,6 +10,7 @@ def _state(runbook_id="rb"):
         predicate=PredicateSpec(path="$.last", op="lt", value=4800),
         cadence=CadenceSpec(interval_seconds=30),
         baseline=4900,
+        **kw,
     )
 
 
@@ -110,3 +111,60 @@ def test_missing_runbook_records_failed_fire(home):
     assert rec["status"] == "failed"
     assert "not found" in rec["error"]
     assert store.read_jsonl(store.fires_path("wch_1"))[0]["status"] == "failed"
+
+
+# --- NEW-12: retry / dead-letter / drift / notify --------------------------
+
+
+def test_retry_then_dead_letter(home):
+    _exec_runbook(home, "#!/bin/sh\nexit 1\n")  # always fails
+    rec = handler.fire(_state(max_retries=2), 4700, sleeper=lambda s: None)
+    assert rec["status"] == "dead_lettered"  # 1 + 2 retries all failed
+
+
+def test_retry_then_success(home):
+    _prompt_runbook(home, tools=["Read"])
+    calls = []
+
+    def run(cmd, **kw):
+        calls.append(1)
+        ok = len(calls) == 2
+        return handler.HandlerResult(0 if ok else 1, "{}", "boom", 7, False)
+
+    rec = handler.fire(_state(max_retries=1), 4700, runner=run, sleeper=lambda s: None)
+    assert rec["status"] == "completed" and len(calls) == 2
+
+
+def test_drift_block_refuses_and_does_not_run(home):
+    _exec_runbook(home, "#!/bin/sh\nexit 0\n")
+    (home / "runbooks" / "rb" / "run.sh").write_text("#!/bin/sh\nexit 0\n# changed\n")  # drift
+
+    def run(cmd, **kw):
+        raise AssertionError("must not launch a drifted runbook")
+
+    rec = handler.fire(_state(), 4700, runner=run)
+    assert rec["status"] == "failed" and "RUNBOOK_DRIFT" in rec["error"]
+
+
+def test_drift_run_policy_executes_anyway(home):
+    _exec_runbook(home, "#!/bin/sh\nexit 0\n")
+    (home / "runbooks" / "rb" / "run.sh").write_text("#!/bin/sh\nexit 0\n# changed\n")
+
+    def run(cmd, **kw):
+        return handler.HandlerResult(0, "{}", "", 5, False)
+
+    rec = handler.fire(_state(drift_policy="run"), 4700, runner=run)
+    assert rec["status"] == "completed"
+
+
+def test_dead_letter_triggers_notify_runbook(home):
+    _exec_runbook(home, "#!/bin/sh\nexit 1\n", rb_id="rb")  # the watch's runbook always fails
+    marker = home / "notified.txt"
+    nd = home / "runbooks" / "notifier"
+    nd.mkdir(parents=True)
+    (nd / "run.sh").write_text(f'#!/bin/sh\necho "$PICKET_PAYLOAD" > "{marker}"\n')
+    (nd / "run.sh").chmod(0o755)
+    runbooks.register_runbook("notifier", runbook_type="exec", entry="run.sh")
+
+    handler.fire(_state(max_retries=1, notify_runbook="notifier"), 4700, sleeper=lambda s: None)
+    assert marker.exists() and "wch_1" in marker.read_text()

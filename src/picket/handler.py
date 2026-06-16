@@ -110,8 +110,9 @@ def fire(
     runner: Runner | None = None,
     max_turns: int = 30,
     timeout: float = 600,
+    sleeper: Callable[[float], None] = time.sleep,
 ) -> dict:
-    """Launch the watch's runbook for one trigger, supervise it, append the fire record."""
+    """Launch the runbook with drift protection, retry-with-backoff, and dead-lettering."""
     runner = runner or _default_runner
     started = now_iso()
     start_t = time.monotonic()
@@ -123,28 +124,38 @@ def fire(
             state, fire_id, "failed", started, error=f"runbook {state.runbook_id!r} not found"
         )
 
+    if _has_drifted(rb) and state.drift_policy == "block":
+        record = _append_fire(
+            state,
+            fire_id,
+            "failed",
+            started,
+            error="RUNBOOK_DRIFT: entry changed since registration",
+        )
+        _maybe_notify(state, "runbook drift blocked")
+        return record
+
     payload = build_payload(state, value, started)
+    attempts = 1 + max(0, state.max_retries)
     with tempfile.TemporaryDirectory() as tmp:
         inv = runbooks.prepare_invocation(rb, payload, Path(tmp))
         cmd = handler_command(rb, inv, max_turns)
-        try:
-            res = runner(cmd, timeout=timeout, env={**os.environ, **inv.env})
-        except OSError as err:
-            return _append_fire(state, fire_id, "failed", started, error=str(err))
+        status, res = "failed", None
+        for attempt in range(attempts):
+            try:
+                res = runner(cmd, timeout=timeout, env={**os.environ, **inv.env})
+            except OSError as err:
+                return _append_fire(state, fire_id, "failed", started, error=str(err))
+            status = _attempt_status(rb, res)  # safety-termination shows as nonzero -> failed
+            if status == "completed":
+                break
+            if attempt < attempts - 1:
+                sleeper(2.0**attempt)  # exponential backoff
 
-    duration_ms = int((time.monotonic() - start_t) * 1000)
-    if res.timed_out:
-        status = "timed_out"
-    elif res.returncode == 0 and not (rb.type == "prompt" and _result_is_error(res.stdout)):
-        status = "completed"
-    else:
-        status = "failed"
-    error = None
-    if status == "timed_out":
-        error = f"handler exceeded {timeout}s timeout"
-    elif status == "failed":
-        error = (res.stderr or res.stdout or "").strip()[:500]
-    return _append_fire(
+    if status != "completed" and state.max_retries > 0:
+        status = "dead_lettered"
+    error = None if status == "completed" else _error_text(status, res, timeout)
+    record = _append_fire(
         state,
         fire_id,
         status,
@@ -152,9 +163,53 @@ def fire(
         exit_code=res.returncode,
         error=error,
         handler_pid=res.pid,
-        duration_ms=duration_ms,
+        duration_ms=int((time.monotonic() - start_t) * 1000),
         transcript_tail=(res.stdout or res.stderr or "").strip()[-_TRANSCRIPT_TAIL:],
     )
+    if status == "dead_lettered":
+        _maybe_notify(state, "handler dead-lettered")
+    return record
+
+
+def _attempt_status(rb: runbooks.Runbook, res: HandlerResult) -> str:
+    if res.timed_out:
+        return "timed_out"
+    if res.returncode == 0 and not (rb.type == "prompt" and _result_is_error(res.stdout)):
+        return "completed"
+    return "failed"
+
+
+def _error_text(status: str, res: HandlerResult, timeout: float) -> str:
+    if status == "timed_out":
+        return f"handler exceeded {timeout}s timeout"
+    return (res.stderr or res.stdout or "").strip()[:500]
+
+
+def _has_drifted(rb: runbooks.Runbook) -> bool:
+    """Re-hash the entry (+ scripts/) and compare to the value stored at registration."""
+    if not rb.content_hash:
+        return False
+    current = runbooks.content_hash(store.runbook_dir(rb.id), rb.entry)
+    return current != rb.content_hash
+
+
+def _maybe_notify(state: WatchState, summary: str) -> None:
+    """Best-effort: run the configured notify runbook's script for a failure."""
+    if not state.notify_runbook:
+        return
+    rb = runbooks.read_runbook(state.notify_runbook)
+    if rb is None:
+        return
+    payload = json.dumps({"watch_id": state.watch_id, "summary": summary})
+    try:
+        subprocess.run(
+            [str(store.runbook_dir(rb.id) / rb.entry)],
+            env={**os.environ, "PICKET_PAYLOAD": payload},
+            capture_output=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
 
 
 def _result_is_error(stdout: str) -> bool:

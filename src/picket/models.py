@@ -115,6 +115,9 @@ class WatchState(BaseModel):
     cooldown_seconds: float = 0
     handler_timeout_seconds: float = 600
     overlap_policy: Literal["drop"] = "drop"
+    max_retries: int = 0  # retries on handler failure/timeout before dead-lettering
+    drift_policy: Literal["block", "run"] = "block"
+    notify_runbook: str | None = None  # runbook to fire on dead-letter/drift
     skip_permissions: bool = False
     created_at: str | None = None
 

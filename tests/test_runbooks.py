@@ -69,6 +69,14 @@ def test_prepare_invocation_prompt_delivers_all_channels(home, tmp_path):
     assert store.read_json(inv.payload_file)["value"] == 4700
 
 
+def test_install_default_notify_runbook(home):
+    rb = runbooks.install_default_notify_runbook()
+    assert rb.id == "picket-notify" and rb.type == "exec"
+    assert (home / "runbooks" / "picket-notify" / "notify.sh").is_file()
+    assert any(r["runbook_id"] == "picket-notify" for r in runbooks.list_runbooks())
+    runbooks.install_default_notify_runbook()  # idempotent
+
+
 def test_prepare_invocation_exec_has_no_prompt(home, tmp_path):
     _make_runbook(home, "notify")
     rb = runbooks.register_runbook("notify", runbook_type="exec", entry="run.sh")

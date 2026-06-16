@@ -33,8 +33,35 @@ class Runbook(BaseModel):
     version: int = 1
 
 
+NOTIFY_RUNBOOK_ID = "picket-notify"
+_NOTIFY_SCRIPT = """#!/bin/sh
+# Default Picket notifier (exec runbook): post a macOS notification for a fire.
+MSG="${PICKET_PAYLOAD:-Picket watch fired}"
+if command -v terminal-notifier >/dev/null 2>&1; then
+  terminal-notifier -title "Picket" -message "$MSG"
+else
+  osascript -e "display notification \\"$MSG\\" with title \\"Picket\\"" 2>/dev/null || true
+fi
+"""
+
+
 def _toml_path(runbook_id: str) -> Path:
     return store.runbook_dir(runbook_id) / "runbook.toml"
+
+
+def install_default_notify_runbook() -> Runbook:
+    """Ship + register the default macOS-notification exec runbook (idempotent)."""
+    rb_dir = store.runbook_dir(NOTIFY_RUNBOOK_ID)
+    rb_dir.mkdir(parents=True, exist_ok=True)
+    script = rb_dir / "notify.sh"
+    script.write_text(_NOTIFY_SCRIPT)
+    script.chmod(0o755)
+    return register_runbook(
+        NOTIFY_RUNBOOK_ID,
+        runbook_type="exec",
+        entry="notify.sh",
+        description="Default macOS notification (osascript / terminal-notifier)",
+    )
 
 
 def content_hash(rb_dir: Path, entry: str) -> str:
