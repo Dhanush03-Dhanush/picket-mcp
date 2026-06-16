@@ -1,5 +1,3 @@
-import subprocess
-
 from picket import handler, runbooks, store
 from picket.models import CadenceSpec, EndpointSpec, PredicateSpec, WatchState
 
@@ -37,7 +35,7 @@ def _fake_runner(captured):
     def run(cmd, **kw):
         captured["cmd"] = cmd
         captured["env"] = kw["env"]
-        return subprocess.CompletedProcess(cmd, 0, stdout='{"result":"ok"}', stderr="")
+        return handler.HandlerResult(0, '{"result":"ok"}', "", 4242, False)
 
     return run
 
@@ -81,18 +79,29 @@ def test_prompt_runbook_builds_scoped_deny_by_default_command(home):
     assert "--max-budget-usd" not in cmd  # §16.4: no budget flag
     assert captured["env"]["PICKET_PAYLOAD"]
     assert rec["status"] == "completed"
+    assert rec["handler_pid"] == 4242 and rec["duration_ms"] is not None
 
 
 def test_prompt_result_is_error_records_failed(home):
     _prompt_runbook(home, tools=["Read"])
 
     def run(cmd, **kw):
-        return subprocess.CompletedProcess(
-            cmd, 0, stdout='{"is_error": true, "result": "denied"}', stderr=""
-        )
+        return handler.HandlerResult(0, '{"is_error": true, "result": "denied"}', "", 1, False)
 
     rec = handler.fire(_state(), 4700, runner=run)
     assert rec["status"] == "failed"  # exit 0 but the handler reported an error
+
+
+def test_handler_timeout_records_timed_out_with_transcript(home):
+    _prompt_runbook(home, tools=["Read"])
+
+    def run(cmd, **kw):
+        return handler.HandlerResult(None, "partial output before kill", "", 99, True)
+
+    rec = handler.fire(_state(), 4700, runner=run, timeout=5)
+    assert rec["status"] == "timed_out"
+    assert "timeout" in rec["error"]
+    assert rec["transcript_tail"] == "partial output before kill"
 
 
 def test_missing_runbook_records_failed_fire(home):

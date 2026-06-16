@@ -194,3 +194,10 @@ def test_ttl_self_stops(home, monkeypatch):
 
     daemon.run("wch_1", iterations=5, sleeper=lambda s: None)
     assert store.read_watch("wch_1").status == "stopped"
+
+
+def test_poll_once_writes_poll_log(home, monkeypatch):
+    _no_real_fire(monkeypatch)
+    monkeypatch.setattr(condition, "fetch", lambda ep, **k: {"last": 4850})
+    daemon.poll_once(_state())
+    assert any("observed" in line for line in store.log_path("wch_1").read_text().splitlines())

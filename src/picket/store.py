@@ -106,6 +106,15 @@ def read_jsonl(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
+def append_log(path: Path, line: str, max_bytes: int = 1_000_000) -> None:
+    """Append a line to a size-capped log; roll over to <name>.1 when it exceeds the cap."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() and path.stat().st_size > max_bytes:
+        path.replace(path.with_name(path.name + ".1"))
+    with path.open("a") as f:
+        f.write(line.rstrip("\n") + "\n")
+
+
 def write_watch(state: WatchState) -> None:
     write_json_atomic(watch_path(state.watch_id), state.model_dump())
 

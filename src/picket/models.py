@@ -76,6 +76,7 @@ class WatchState(BaseModel):
     ttl_seconds: float | None = None
     debounce_seconds: float = 0
     cooldown_seconds: float = 0
+    handler_timeout_seconds: float = 600
     overlap_policy: Literal["drop"] = "drop"
     skip_permissions: bool = False
     created_at: str | None = None

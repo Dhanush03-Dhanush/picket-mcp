@@ -12,10 +12,13 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import subprocess
 import tempfile
+import time
 import uuid
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -23,11 +26,45 @@ from picket import runbooks, store
 from picket.models import WatchState
 from picket.store import now_iso
 
-Runner = Callable[..., subprocess.CompletedProcess]
+_TRANSCRIPT_TAIL = 2000
+
+
+@dataclass
+class HandlerResult:
+    returncode: int | None
+    stdout: str
+    stderr: str
+    pid: int | None
+    timed_out: bool
+
+
+Runner = Callable[..., HandlerResult]
 
 
 def _claude_bin() -> str:
     return shutil.which("claude") or "claude"
+
+
+def _default_runner(cmd: list[str], *, timeout: float, env: dict) -> HandlerResult:
+    """Run the handler in its own session, capturing output and killing the group on timeout."""
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+        start_new_session=True,
+    )
+    try:
+        out, err = proc.communicate(timeout=timeout)
+        return HandlerResult(proc.returncode, out, err, proc.pid, False)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, OSError):
+            proc.kill()
+        out, err = proc.communicate()
+        return HandlerResult(None, out or "", err or "", proc.pid, True)
 
 
 def build_payload(state: WatchState, value: Any, fired_at: str) -> dict:
@@ -67,11 +104,17 @@ def handler_command(rb: runbooks.Runbook, inv: runbooks.Invocation, max_turns: i
 
 
 def fire(
-    state: WatchState, value: Any, *, runner: Runner | None = None, max_turns: int = 30
+    state: WatchState,
+    value: Any,
+    *,
+    runner: Runner | None = None,
+    max_turns: int = 30,
+    timeout: float = 600,
 ) -> dict:
-    """Launch the watch's runbook for one trigger and append the fire record."""
-    runner = runner or subprocess.run
+    """Launch the watch's runbook for one trigger, supervise it, append the fire record."""
+    runner = runner or _default_runner
     started = now_iso()
+    start_t = time.monotonic()
     fire_id = f"fire_{uuid.uuid4().hex[:12]}"
 
     rb = runbooks.read_runbook(state.runbook_id)
@@ -85,14 +128,33 @@ def fire(
         inv = runbooks.prepare_invocation(rb, payload, Path(tmp))
         cmd = handler_command(rb, inv, max_turns)
         try:
-            proc = runner(cmd, capture_output=True, text=True, env={**os.environ, **inv.env})
+            res = runner(cmd, timeout=timeout, env={**os.environ, **inv.env})
         except OSError as err:
             return _append_fire(state, fire_id, "failed", started, error=str(err))
 
-    ok = proc.returncode == 0 and not (rb.type == "prompt" and _result_is_error(proc.stdout))
-    status = "completed" if ok else "failed"
-    error = None if ok else (proc.stderr or proc.stdout or "").strip()[:500]
-    return _append_fire(state, fire_id, status, started, exit_code=proc.returncode, error=error)
+    duration_ms = int((time.monotonic() - start_t) * 1000)
+    if res.timed_out:
+        status = "timed_out"
+    elif res.returncode == 0 and not (rb.type == "prompt" and _result_is_error(res.stdout)):
+        status = "completed"
+    else:
+        status = "failed"
+    error = None
+    if status == "timed_out":
+        error = f"handler exceeded {timeout}s timeout"
+    elif status == "failed":
+        error = (res.stderr or res.stdout or "").strip()[:500]
+    return _append_fire(
+        state,
+        fire_id,
+        status,
+        started,
+        exit_code=res.returncode,
+        error=error,
+        handler_pid=res.pid,
+        duration_ms=duration_ms,
+        transcript_tail=(res.stdout or res.stderr or "").strip()[-_TRANSCRIPT_TAIL:],
+    )
 
 
 def _result_is_error(stdout: str) -> bool:
@@ -116,6 +178,9 @@ def _append_fire(
     *,
     exit_code: int | None = None,
     error: str | None = None,
+    handler_pid: int | None = None,
+    duration_ms: int | None = None,
+    transcript_tail: str | None = None,
 ) -> dict:
     record = {
         "fire_id": fire_id,
@@ -126,6 +191,9 @@ def _append_fire(
         "ended_at": now_iso(),
         "exit_code": exit_code,
         "error": error,
+        "handler_pid": handler_pid,
+        "duration_ms": duration_ms,
+        "transcript_tail": transcript_tail,
     }
     store.append_jsonl(store.fires_path(state.watch_id), record)
     return record

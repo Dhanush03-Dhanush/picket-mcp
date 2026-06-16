@@ -52,6 +52,14 @@ def test_read_missing_watch_returns_none(home):
     assert store.read_watch("wch_nope") is None
 
 
+def test_append_log_rotates_when_capped(home):
+    log = home / "logs" / "wch_test.log"
+    store.append_log(log, "x" * 100, max_bytes=50)  # under cap initially
+    store.append_log(log, "second line", max_bytes=50)  # now over cap -> rotate
+    assert (home / "logs" / "wch_test.log.1").exists()
+    assert log.read_text().strip() == "second line"
+
+
 def test_atomic_write_leaves_no_temp_and_overwrites(home):
     path = home / "watches" / "wch_test.json"
     store.write_watch(_sample_state())

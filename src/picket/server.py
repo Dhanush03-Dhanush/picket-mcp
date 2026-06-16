@@ -11,7 +11,7 @@ from typing import Literal
 
 from fastmcp import FastMCP
 
-from picket import __version__, condition, runbooks, watches
+from picket import __version__, audit, condition, runbooks, watches
 from picket.errors import ErrorCode, failure
 from picket.models import EndpointSpec, InvalidSpec, PredicateSpec, parse
 
@@ -132,6 +132,18 @@ def pause_watch(watch_id: str) -> dict:
 def resume_watch(watch_id: str) -> dict:
     """Resume polling on a paused watch without recomputing the baseline."""
     return watches.resume_watch(watch_id)
+
+
+@mcp.tool
+def get_fire_log(watch_id: str | None = None, limit: int = 20) -> dict:
+    """Recent fire records (across all watches if watch_id is omitted)."""
+    return audit.get_fire_log(watch_id, limit)
+
+
+@mcp.tool
+def tail_watch_log(watch_id: str, lines: int = 50) -> dict:
+    """Recent poll/debug log lines for one watch — 'is it even observing?'."""
+    return audit.tail_watch_log(watch_id, lines)
 
 
 def main() -> None:

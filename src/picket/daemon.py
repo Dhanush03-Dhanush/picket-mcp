@@ -65,11 +65,13 @@ def poll_once(state: WatchState) -> WatchState:
         now_satisfied = condition.is_satisfied(state.predicate, value, state.baseline)
     except ObserveError as err:
         state.last_error = str(err)  # could-not-observe != change: never fires
+        _log(state, f"observe-error: {err}")
         store.write_watch(state)
         return state
 
     state.last_value = value
     state.last_error = None
+    _log(state, f"observed {value!r} satisfied={now_satisfied}")
     if now_satisfied and not state.satisfied:  # rising edge starts an episode
         state.satisfied_since = now
         state.fired_this_episode = False
@@ -80,10 +82,12 @@ def poll_once(state: WatchState) -> WatchState:
     if now_satisfied and not state.fired_this_episode and _gates_open(state, now):
         lock = _acquire_lock(state.watch_id)
         if lock is None:
-            handler.record_skipped_overlap(state)  # a handler is already in flight
+            _log(state, "skipped_overlap: a handler is already in flight")
+            handler.record_skipped_overlap(state)
         else:
             try:
-                handler.fire(state, value)
+                _log(state, f"FIRE -> runbook {state.runbook_id}")
+                handler.fire(state, value, timeout=state.handler_timeout_seconds)
             finally:
                 fcntl.flock(lock, fcntl.LOCK_UN)
                 lock.close()
@@ -97,6 +101,10 @@ def poll_once(state: WatchState) -> WatchState:
     state.satisfied = now_satisfied
     store.write_watch(state)
     return state
+
+
+def _log(state: WatchState, message: str) -> None:
+    store.append_log(store.log_path(state.watch_id), f"{now_iso()} {message}")
 
 
 def _record_identity(state: WatchState) -> None:
