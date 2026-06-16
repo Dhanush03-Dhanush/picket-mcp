@@ -164,10 +164,20 @@ Therefore any runbook that places a trade **must**, inside the runbook:
    broker-side idempotent order, a balance/limit precondition, or an explicit
    approval), never on Picket's delivery alone.
 
-## Manual smoke test
+## Smoke tests
 
-Hermetic tests mock the network and the `claude` launch. To prove it end-to-end
-against a live, side-effecting daemon, run this in a throwaway root:
+The default `pytest` run is hermetic (mocks the network and the `claude` launch).
+An **opt-in** suite exercises the real seams — a real detached daemon polling a
+local HTTP server and firing a real `exec` handler — cheaply (no `claude`, no
+tokens, sub-second intervals, self-limiting watchers) and self-cleaning (temp
+`PICKET_HOME`, daemons reaped on teardown):
+
+```sh
+uv run pytest -m smoke
+```
+
+To prove it end-to-end by hand against a live, side-effecting daemon, run this in
+a throwaway root:
 
 ```sh
 export PICKET_HOME="$PWD/.picket-home"
@@ -190,5 +200,6 @@ chmod +x "$PICKET_HOME/runbooks/echo/run.sh"
 
 ```sh
 uv run ruff check . && uv run ruff format --check .
-uv run pytest -q
+uv run pytest -q            # hermetic unit suite
+uv run pytest -m smoke      # opt-in real-process smoke suite
 ```

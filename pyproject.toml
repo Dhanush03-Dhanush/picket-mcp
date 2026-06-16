@@ -36,3 +36,5 @@ select = ["E", "F", "I", "B", "UP"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["smoke: real-process smoke tests (opt-in; run with -m smoke)"]
+addopts = "-m 'not smoke'"
