@@ -167,14 +167,19 @@ Therefore any runbook that places a trade **must**, inside the runbook:
 ## Smoke tests
 
 The default `pytest` run is hermetic (mocks the network and the `claude` launch).
-An **opt-in** suite exercises the real seams — a real detached daemon polling a
-local HTTP server and firing a real `exec` handler — cheaply (no `claude`, no
-tokens, sub-second intervals, self-limiting watchers) and self-cleaning (temp
-`PICKET_HOME`, daemons reaped on teardown):
+Two **opt-in** suites exercise the real seams; both self-limit (`max_fires=1`, so
+each watcher fires once and self-stops) and self-clean (temp `PICKET_HOME`,
+daemons reaped on teardown):
 
 ```sh
-uv run pytest -m smoke
+uv run pytest -m smoke          # real detached daemons + exec handlers; no tokens
+uv run pytest -m claude_smoke   # also fires a real, minimal `claude -p` (spends tokens)
 ```
+
+`-m smoke` covers the conditional predicates (`pct_change`, `crosses_above`,
+`on_change`) and a live **public-API monitor** (Coinbase BTC spot — the SPX
+example shape against a real, no-auth endpoint; skipped if unreachable).
+`-m claude_smoke` skips cleanly when the `claude` CLI isn't on `PATH`.
 
 To prove it end-to-end by hand against a live, side-effecting daemon, run this in
 a throwaway root:
@@ -200,6 +205,7 @@ chmod +x "$PICKET_HOME/runbooks/echo/run.sh"
 
 ```sh
 uv run ruff check . && uv run ruff format --check .
-uv run pytest -q            # hermetic unit suite
-uv run pytest -m smoke      # opt-in real-process smoke suite
+uv run pytest -q              # hermetic unit suite
+uv run pytest -m smoke        # opt-in real-process smoke suite (no tokens)
+uv run pytest -m claude_smoke # opt-in; fires a real claude -p (spends tokens)
 ```

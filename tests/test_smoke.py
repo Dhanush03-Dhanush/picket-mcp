@@ -1,90 +1,32 @@
-"""Opt-in real-process smoke tests (NEW-14).
+"""Opt-in real-process smoke tests (NEW-14/NEW-15).
 
-These spawn REAL detached daemons that poll a REAL (local, stdlib) HTTP server and
-fire REAL exec handlers — the seams the hermetic suite mocks. They stay cheap
-(exec only: no claude, no tokens; sub-second intervals; self-limiting watchers)
-and self-clean (temp PICKET_HOME + a teardown that stops and reaps every daemon).
+These spawn REAL detached daemons that poll a REAL HTTP server and fire REAL exec
+handlers — the seams the hermetic suite mocks. They stay cheap (exec only: no
+claude, no tokens; sub-second intervals; max_fires=1 so each watcher fires once
+and self-stops) and self-clean (temp PICKET_HOME + a teardown that reaps every
+daemon — see conftest `smoke_home`).
 
 Deselected from the default run; execute with:  uv run pytest -m smoke
 """
 
-import json
-import os
-import signal
-import threading
-import time
-from http.server import BaseHTTPRequestHandler, HTTPServer
-
+import httpx
 import psutil
 import pytest
 
-from picket import runbooks, store, watches
+from picket import store, watches
 
 pytestmark = pytest.mark.smoke
 
-
-@pytest.fixture
-def server():
-    """A localhost JSON endpoint whose value the test can mutate to trigger a fire."""
-    value = {"last": 5000}
-
-    class Handler(BaseHTTPRequestHandler):
-        def do_GET(self):
-            body = json.dumps(value).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-
-        def log_message(self, *args):
-            pass  # keep test output clean
-
-    httpd = HTTPServer(("127.0.0.1", 0), Handler)
-    threading.Thread(target=httpd.serve_forever, daemon=True).start()
-    try:
-        yield f"http://127.0.0.1:{httpd.server_address[1]}/", value
-    finally:
-        httpd.shutdown()
+# A real, no-auth public API for the monitoring example (mirrors the SPX use case).
+PUBLIC_API = "https://api.coinbase.com/v2/prices/BTC-USD/spot"
 
 
-@pytest.fixture
-def smoke_home(home):
-    """Temp PICKET_HOME (from `home`) plus a teardown that reaps every real daemon."""
-    store.ensure_root()
-    yield home
-    watches.stop_all_watches(confirm=True, status_filter="all", mode="immediate")
-    for path in (home / "watches").glob("*.json"):
-        state = store.read_watch(path.stem)
-        if state and state.pgid:
-            try:
-                os.killpg(state.pgid, signal.SIGKILL)
-            except (ProcessLookupError, OSError):
-                pass
-
-
-def _exec_runbook(home, body, rb_id="rb"):
-    d = home / "runbooks" / rb_id
-    d.mkdir(parents=True)
-    script = d / "run.sh"
-    script.write_text(body)
-    script.chmod(0o755)
-    runbooks.register_runbook(rb_id, runbook_type="exec", entry="run.sh")
-
-
-def _wait(predicate, timeout=10.0):
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if predicate():
-            return True
-        time.sleep(0.1)
-    return False
-
-
-def test_smoke_arm_fires_real_exec_handler_then_self_stops(smoke_home, server):
+def test_smoke_arm_fires_real_exec_handler_then_self_stops(
+    smoke_home, server, exec_runbook, poll_until
+):
     url, value = server
     marker = smoke_home / "fired.txt"
-    _exec_runbook(smoke_home, f'#!/bin/sh\nprintf "%s" "$PICKET_PAYLOAD" > "{marker}"\n')
+    exec_runbook(f'#!/bin/sh\nprintf "%s" "$PICKET_PAYLOAD" > "{marker}"\n')
 
     res = watches.arm_watch(
         runbook_id="rb",
@@ -95,19 +37,18 @@ def test_smoke_arm_fires_real_exec_handler_then_self_stops(smoke_home, server):
     )
     assert res["ok"] and psutil.pid_exists(res["pid"])
 
-    value["last"] = 4700  # the real daemon will observe this on its next poll and fire
-    assert _wait(lambda: store.read_jsonl(store.fires_path(res["watch_id"])))
-    fires = store.read_jsonl(store.fires_path(res["watch_id"]))
-    assert fires[-1]["status"] == "completed"
+    value["last"] = 4700  # the real daemon observes this on its next poll and fires
+    assert poll_until(lambda: store.read_jsonl(store.fires_path(res["watch_id"])))
+    assert store.read_jsonl(store.fires_path(res["watch_id"]))[-1]["status"] == "completed"
     assert marker.exists() and res["watch_id"] in marker.read_text()
-
-    # max_fires=1 -> the daemon self-stops
-    assert _wait(lambda: store.read_watch(res["watch_id"]).status == "stopped")
+    assert poll_until(lambda: store.read_watch(res["watch_id"]).status == "stopped")  # max_fires=1
 
 
-def test_smoke_stop_verify_before_kill_and_pause_resume(smoke_home, server):
+def test_smoke_stop_verify_before_kill_and_pause_resume(
+    smoke_home, server, exec_runbook, poll_until
+):
     url, _ = server
-    _exec_runbook(smoke_home, "#!/bin/sh\nexit 0\n")
+    exec_runbook("#!/bin/sh\nexit 0\n")
 
     res = watches.arm_watch(
         runbook_id="rb",
@@ -119,9 +60,67 @@ def test_smoke_stop_verify_before_kill_and_pause_resume(smoke_home, server):
     assert psutil.pid_exists(pid)
 
     watches.pause_watch(res["watch_id"])
-    assert _wait(lambda: store.read_watch(res["watch_id"]).status == "paused")
+    assert poll_until(lambda: store.read_watch(res["watch_id"]).status == "paused")
     watches.resume_watch(res["watch_id"])
-    assert _wait(lambda: store.read_watch(res["watch_id"]).status == "active")
+    assert poll_until(lambda: store.read_watch(res["watch_id"]).status == "active")
 
     watches.stop_watch(res["watch_id"], mode="immediate")
-    assert _wait(lambda: not psutil.pid_exists(pid), timeout=5)  # verify-before-kill worked
+    assert poll_until(lambda: not psutil.pid_exists(pid), timeout=5)  # verify-before-kill
+
+
+@pytest.mark.parametrize(
+    "initial, predicate, trigger",
+    [
+        (100, {"path": "$.last", "op": "pct_change", "value": -2, "baseline_mode": "arm_time"}, 97),
+        (5, {"path": "$.last", "op": "crosses_above", "value": 10}, 12),
+        (1, {"path": "$.last", "op": "on_change"}, 2),
+    ],
+)
+def test_smoke_conditional_daemon_fires_once(
+    smoke_home, server, exec_runbook, poll_until, initial, predicate, trigger
+):
+    """A real daemon firing once on the crossing, across the richer predicate types."""
+    url, value = server
+    value["last"] = initial  # set before arm so the baseline is captured correctly
+    exec_runbook("#!/bin/sh\nexit 0\n")
+
+    res = watches.arm_watch(
+        runbook_id="rb",
+        endpoint={"url": url},
+        predicate=predicate,
+        cadence={"interval_seconds": 0.2},
+        max_fires=1,
+    )
+    assert res["ok"]
+    value["last"] = trigger  # the real daemon observes the crossing and fires
+
+    assert poll_until(lambda: store.read_jsonl(store.fires_path(res["watch_id"])))
+    assert store.read_jsonl(store.fires_path(res["watch_id"]))[-1]["status"] == "completed"
+    assert poll_until(lambda: store.read_watch(res["watch_id"]).status == "stopped")
+
+
+def test_smoke_public_api_monitor_fires_once_and_cleans_up(smoke_home, exec_runbook, poll_until):
+    """Mimic "watch the SPX endpoint, run my runbook on the condition" against a real,
+    no-auth public API. The predicate (price > 0) is guaranteed true so this one-shot
+    fires deterministically (real use would be pct_change / lt a real threshold);
+    max_fires=1 self-stops and the daemon is reaped on teardown."""
+    try:
+        httpx.get(PUBLIC_API, timeout=5).raise_for_status()
+    except (httpx.HTTPError, OSError):
+        pytest.skip("public API unreachable")
+
+    marker = smoke_home / "public_fired.txt"
+    exec_runbook(f'#!/bin/sh\nprintf "%s" "$PICKET_PAYLOAD" > "{marker}"\n')
+
+    res = watches.arm_watch(
+        runbook_id="rb",
+        endpoint={"url": PUBLIC_API},
+        predicate={"path": "$.data.amount", "op": "gt", "value": 0},
+        cadence={"interval_seconds": 1},
+        max_fires=1,
+    )
+    assert res["ok"]
+
+    assert poll_until(lambda: store.read_watch(res["watch_id"]).status == "stopped", timeout=20)
+    assert marker.exists()
+    assert store.read_jsonl(store.fires_path(res["watch_id"]))[-1]["status"] == "completed"
