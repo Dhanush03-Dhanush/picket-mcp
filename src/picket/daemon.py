@@ -11,22 +11,38 @@ from __future__ import annotations
 
 import fcntl
 import os
+import random
 import sys
 import time
 from collections.abc import Callable
 from datetime import datetime
 from typing import IO
+from zoneinfo import ZoneInfo
 
 import psutil
 
 from picket import condition, handler, store
 from picket.condition import ObserveError
-from picket.models import WatchState
+from picket.models import CadenceSpec, WatchState
 from picket.store import now_iso
 
 
 def _parse(ts: str) -> datetime:
     return datetime.fromisoformat(ts)
+
+
+def in_active_window(cadence: CadenceSpec, now: datetime | None = None) -> bool:
+    """Whether polling is allowed right now (tz-aware window; supports midnight wrap)."""
+    window = cadence.active_window
+    if window is None:
+        return True
+    now = now or datetime.now(ZoneInfo(window.tz))
+    if now.weekday() not in window.days:
+        return False
+    t = now.strftime("%H:%M")
+    if window.start <= window.end:
+        return window.start <= t <= window.end
+    return t >= window.start or t <= window.end  # window wraps past midnight
 
 
 def _gates_open(state: WatchState, now: str) -> bool:
@@ -98,6 +114,8 @@ def poll_once(state: WatchState) -> WatchState:
                 state.baseline = value  # re-arm against the new value
                 now_satisfied = False
                 state.satisfied_since = None
+    if state.predicate.op == "pct_change" and state.predicate.baseline_mode == "last_value":
+        state.baseline = value  # track the prior poll for per-interval % change
     state.satisfied = now_satisfied
     store.write_watch(state)
     return state
@@ -140,7 +158,7 @@ def run(
         if _ttl_expired(state):
             return _self_stop(state)
 
-        if state.status == "paused":
+        if state.status == "paused" or not in_active_window(state.cadence):
             state.heartbeat_at = now_iso()  # stay alive, do not poll
             store.write_watch(state)
         else:
@@ -150,7 +168,8 @@ def run(
 
         n += 1
         if iterations is None or n < iterations:
-            sleeper(state.cadence.interval_seconds)
+            jitter = random.uniform(0, state.cadence.jitter_seconds)
+            sleeper(state.cadence.interval_seconds + jitter)
 
 
 def _self_stop(state: WatchState) -> None:

@@ -16,6 +16,7 @@ import time
 import psutil
 
 from picket import condition, daemon, runbooks, store
+from picket.condition import ObserveError
 from picket.errors import ErrorCode, failure
 from picket.models import (
     CadenceSpec,
@@ -80,11 +81,12 @@ def arm_watch(
     if runbooks.read_runbook(runbook_id) is None:
         return failure(ErrorCode.RUNBOOK_NOT_FOUND, f"runbook {runbook_id!r} is not registered")
 
-    trial = condition.run_test_predicate(ep, pr)
-    if trial["extract_error"]:
-        return failure(ErrorCode.ENDPOINT_UNREACHABLE, trial["extract_error"])
-    trial_value = trial["extracted_value"]
-    baseline = trial_value if pr.op == "on_change" else None
+    try:
+        trial_data = condition.fetch(ep)
+        trial_value = condition.extract(trial_data, pr.path)
+        baseline = condition.initial_baseline(pr, trial_value, trial_data)
+    except ObserveError as err:
+        return failure(ErrorCode.ENDPOINT_UNREACHABLE, str(err))
 
     watch_id = store.new_watch_id()
     store.ensure_root()

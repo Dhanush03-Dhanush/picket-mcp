@@ -125,3 +125,50 @@ def test_run_test_predicate_reports_extract_error(monkeypatch):
     )
     assert res["would_fire"] is False
     assert "not found" in res["extract_error"]
+
+
+# --- NEW-11: pct_change, crosses, baseline capture -------------------------
+
+
+def test_pct_change_signed_threshold():
+    drop = PredicateSpec(path="$.last", op="pct_change", value=-2)  # dropped >= 2%
+    assert condition.is_satisfied(drop, 98, baseline=100) is True
+    assert condition.is_satisfied(drop, 99, baseline=100) is False
+    assert condition.is_satisfied(drop, 102, baseline=100) is False
+    assert condition.is_satisfied(drop, 98, baseline=None) is False  # no baseline yet
+
+    rise = PredicateSpec(path="$.last", op="pct_change", value=2)  # up >= 2%
+    assert condition.is_satisfied(rise, 102, baseline=100) is True
+    assert condition.is_satisfied(rise, 101, baseline=100) is False
+
+
+def test_crosses_above_below_are_threshold_checks():
+    below = PredicateSpec(path="$.x", op="crosses_below", value=10)
+    above = PredicateSpec(path="$.x", op="crosses_above", value=10)
+    assert condition.is_satisfied(below, 9) is True
+    assert condition.is_satisfied(below, 11) is False
+    assert condition.is_satisfied(above, 11) is True
+    assert condition.is_satisfied(above, 9) is False
+
+
+def test_initial_baseline_modes():
+    data = {"last": 4850, "prev_close": 4900}
+    lt = PredicateSpec(path="$.last", op="lt", value=1)
+    assert condition.initial_baseline(lt, 4850, data) is None
+    on_change = PredicateSpec(path="$.last", op="on_change")
+    assert condition.initial_baseline(on_change, 4850, data) == 4850
+
+    arm = PredicateSpec(path="$.last", op="pct_change", value=-2, baseline_mode="arm_time")
+    assert condition.initial_baseline(arm, 4850, data) == 4850
+    absolute = PredicateSpec(
+        path="$.last", op="pct_change", value=-2, baseline_mode="absolute", baseline_value=5000
+    )
+    assert condition.initial_baseline(absolute, 4850, data) == 5000
+    prior = PredicateSpec(
+        path="$.last",
+        op="pct_change",
+        value=-2,
+        baseline_mode="prior_close",
+        baseline_path="$.prev_close",
+    )
+    assert condition.initial_baseline(prior, 4850, data) == 4900

@@ -5,7 +5,7 @@ import psutil
 import pytest
 
 from picket import condition, daemon, handler, store
-from picket.models import CadenceSpec, EndpointSpec, PredicateSpec, WatchState
+from picket.models import ActiveWindow, CadenceSpec, EndpointSpec, PredicateSpec, WatchState
 
 
 def _state(predicate=None, baseline=4900, **kw):
@@ -201,3 +201,69 @@ def test_poll_once_writes_poll_log(home, monkeypatch):
     monkeypatch.setattr(condition, "fetch", lambda ep, **k: {"last": 4850})
     daemon.poll_once(_state())
     assert any("observed" in line for line in store.log_path("wch_1").read_text().splitlines())
+
+
+# --- NEW-11: advanced predicates and cadence -------------------------------
+
+
+def _utc(h):
+    return datetime(2026, 6, 15, h, 0, tzinfo=UTC)
+
+
+def test_in_active_window_time_days_and_wrap():
+    every_day = list(range(7))
+    hours = CadenceSpec(
+        interval_seconds=30,
+        active_window=ActiveWindow(start="09:00", end="17:00", days=every_day),
+    )
+    assert daemon.in_active_window(hours, _utc(10)) is True
+    assert daemon.in_active_window(hours, _utc(20)) is False
+    assert daemon.in_active_window(CadenceSpec(interval_seconds=30)) is True  # no window
+
+    no_days = CadenceSpec(interval_seconds=30, active_window=ActiveWindow(days=[]))
+    assert daemon.in_active_window(no_days, _utc(10)) is False
+
+    wrap = CadenceSpec(
+        interval_seconds=30,
+        active_window=ActiveWindow(start="22:00", end="02:00", days=every_day),
+    )
+    assert daemon.in_active_window(wrap, _utc(23)) is True
+    assert daemon.in_active_window(wrap, _utc(12)) is False
+
+
+def test_active_window_suppresses_polling(home, monkeypatch):
+    fetched = []
+    monkeypatch.setattr(condition, "fetch", lambda ep, **k: fetched.append(1) or {"last": 4700})
+    st = _state()
+    st.cadence.active_window = ActiveWindow(days=[])  # never active
+    store.write_watch(st)
+
+    daemon.run("wch_1", iterations=2, sleeper=lambda s: None)
+    assert fetched == []  # polling suppressed outside the window
+    assert store.read_watch("wch_1").heartbeat_at is not None  # but daemon stays alive
+
+
+def test_pct_change_last_value_rearms_each_poll(home, monkeypatch):
+    fired = _no_real_fire(monkeypatch)
+    values = iter([{"last": 100}, {"last": 103}, {"last": 103}])
+    monkeypatch.setattr(condition, "fetch", lambda ep, **k: next(values))
+    st = _state(predicate=PredicateSpec(path="$.last", op="pct_change", value=2), baseline=100)
+
+    daemon.poll_once(st)  # 0% vs 100 -> no fire; baseline tracks to 100
+    assert st.fire_count == 0 and st.baseline == 100
+    daemon.poll_once(st)  # +3% vs 100 -> fire; baseline tracks to 103
+    assert st.fire_count == 1 and st.baseline == 103
+    daemon.poll_once(st)  # 0% vs 103 -> no fire
+    assert st.fire_count == 1 and fired == [103]
+
+
+def test_crosses_above_fires_only_on_crossing(home, monkeypatch):
+    fired = _no_real_fire(monkeypatch)
+    values = iter([{"last": 9}, {"last": 11}, {"last": 12}])
+    monkeypatch.setattr(condition, "fetch", lambda ep, **k: next(values))
+    st = _state(predicate=PredicateSpec(path="$.last", op="crosses_above", value=10))
+
+    daemon.poll_once(st)  # below
+    daemon.poll_once(st)  # crosses above -> fire
+    daemon.poll_once(st)  # already above -> no re-fire
+    assert fired == [11] and st.fire_count == 1

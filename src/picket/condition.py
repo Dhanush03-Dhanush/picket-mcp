@@ -79,9 +79,16 @@ def _as_target_type(value: Any, target: Any) -> Any:
 
 
 def is_satisfied(predicate: PredicateSpec, value: Any, baseline: Any = None) -> bool:
-    """Whether the predicate currently holds (stateless except on_change's baseline)."""
+    """Whether the predicate currently holds (stateless except for baseline-relative ops)."""
     if predicate.op == "on_change":
         return baseline is not None and value != baseline
+
+    if predicate.op == "pct_change":
+        if not baseline:  # None or 0: nothing to measure against
+            return False
+        pct = (_as_target_type(value, 0.0) - baseline) / baseline * 100
+        threshold = predicate.value
+        return pct <= threshold if threshold < 0 else pct >= threshold
 
     target = predicate.value
     v = _as_target_type(value, target)
@@ -92,7 +99,24 @@ def is_satisfied(predicate: PredicateSpec, value: Any, baseline: Any = None) -> 
         "gte": v >= target,
         "eq": v == target,
         "ne": v != target,
+        "crosses_below": v < target,  # the edge model makes this a crossing
+        "crosses_above": v > target,
     }[predicate.op]
+
+
+def initial_baseline(predicate: PredicateSpec, trial_value: Any, trial_data: Any) -> Any:
+    """Capture the baseline to persist at arm time (so a restart never recomputes it)."""
+    if predicate.op == "on_change":
+        return trial_value
+    if predicate.op == "pct_change":
+        if predicate.baseline_mode == "arm_time":
+            return trial_value
+        if predicate.baseline_mode == "absolute":
+            return predicate.baseline_value
+        if predicate.baseline_mode == "prior_close":
+            return extract(trial_data, predicate.baseline_path)
+        return trial_value  # last_value: start from the arm-time value
+    return None  # lt/gt/crosses_* compare to a fixed threshold, no baseline needed
 
 
 def _excerpt(data: Any, limit: int = 500) -> str:

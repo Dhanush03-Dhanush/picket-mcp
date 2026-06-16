@@ -12,8 +12,19 @@ from typing import Any, Literal, TypeVar
 
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
-# v0 predicate operators (NEW-4). NEW-11 extends this set.
-PredicateOp = Literal["on_change", "lt", "gt", "lte", "gte", "eq", "ne"]
+PredicateOp = Literal[
+    "on_change",
+    "lt",
+    "gt",
+    "lte",
+    "gte",
+    "eq",
+    "ne",  # NEW-4
+    "pct_change",
+    "crosses_above",
+    "crosses_below",  # NEW-11
+]
+BaselineMode = Literal["last_value", "arm_time", "prior_close", "absolute"]
 
 
 class EndpointSpec(BaseModel):
@@ -34,23 +45,49 @@ class EndpointSpec(BaseModel):
 
 
 class PredicateSpec(BaseModel):
-    """How to extract and test a value. ``op=on_change`` ignores ``value``."""
+    """How to extract and test a value. ``op=on_change`` ignores ``value``.
+
+    For ``pct_change``, ``value`` is the signed % threshold (e.g. -2 = dropped 2%)
+    and ``baseline_mode`` says what to measure against: ``last_value`` (prior poll),
+    ``arm_time`` (value when armed), ``prior_close`` (``baseline_path`` extracted at
+    arm time), or ``absolute`` (``baseline_value``). Non-last_value baselines are
+    captured + persisted at arm time so a restart restores rather than recomputes.
+    """
 
     path: str
     op: PredicateOp
     value: float | str | None = None
+    baseline_mode: BaselineMode = "last_value"
+    baseline_value: float | None = None
+    baseline_path: str | None = None
 
     @model_validator(mode="after")
-    def _threshold_needs_value(self) -> PredicateSpec:
+    def _check(self) -> PredicateSpec:
         if self.op != "on_change" and self.value is None:
             raise ValueError(f"op {self.op!r} requires 'value'")
+        if self.op == "pct_change":
+            if self.baseline_mode == "absolute" and self.baseline_value is None:
+                raise ValueError("pct_change absolute baseline requires baseline_value")
+            if self.baseline_mode == "prior_close" and not self.baseline_path:
+                raise ValueError("pct_change prior_close baseline requires baseline_path")
         return self
+
+
+class ActiveWindow(BaseModel):
+    """When polling is allowed (else the daemon idles). Weekdays: Mon=0 .. Sun=6."""
+
+    tz: str = "UTC"
+    start: str = "00:00"
+    end: str = "23:59"
+    days: list[int] = Field(default_factory=lambda: [0, 1, 2, 3, 4, 5, 6])
 
 
 class CadenceSpec(BaseModel):
     """How often to poll."""
 
     interval_seconds: float = Field(gt=0)
+    jitter_seconds: float = 0
+    active_window: ActiveWindow | None = None
 
 
 WatchStatus = Literal["active", "paused", "stopped", "errored"]

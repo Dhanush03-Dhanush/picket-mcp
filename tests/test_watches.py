@@ -72,6 +72,28 @@ def test_arm_watch_on_change_persists_baseline(home, monkeypatch):
     assert res["baseline"] == 100
 
 
+def test_arm_pct_change_prior_close_persists_baseline(home, monkeypatch):
+    _register_runbook(home)
+    monkeypatch.setattr(condition, "fetch", lambda ep, **k: {"last": 4850, "prev_close": 4900})
+    _fake_spawn(monkeypatch)
+
+    res = watches.arm_watch(
+        runbook_id="rb",
+        endpoint=EP,
+        predicate={
+            "path": "$.last",
+            "op": "pct_change",
+            "value": -2,
+            "baseline_mode": "prior_close",
+            "baseline_path": "$.prev_close",
+        },
+        cadence=CAD,
+    )
+    assert res["baseline"] == 4900
+    # persisted at arm time -> a restart (re-read) restores it without recompute
+    assert store.read_watch(res["watch_id"]).baseline == 4900
+
+
 def test_arm_watch_invalid_spec(home):
     res = watches.arm_watch(
         runbook_id="rb", endpoint={"url": "ftp://no"}, predicate=PR, cadence=CAD
