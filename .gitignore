@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+dist/
+build/
+
+# uv
+uv.lock
+
+# tooling
+.pytest_cache/
+.ruff_cache/
+
+# local picket root used in manual smoke tests
+.picket-home/
