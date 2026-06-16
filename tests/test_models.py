@@ -16,6 +16,7 @@ def test_good_specs_validate():
     [
         lambda: EndpointSpec(url="ftp://nope"),  # bad scheme
         lambda: PredicateSpec(path="$.last", op="between", value=1),  # unknown op
+        lambda: PredicateSpec(path="$.last", op="lt"),  # threshold op needs a value
         lambda: CadenceSpec(interval_seconds=0),  # must be > 0
     ],
 )

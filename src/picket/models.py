@@ -8,9 +8,9 @@ Later phases extend the predicate op set (NEW-11) and the cadence window
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, Literal, TypeVar
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 # v0 predicate operators (NEW-4). NEW-11 extends this set.
 PredicateOp = Literal["on_change", "lt", "gt", "lte", "gte", "eq", "ne"]
@@ -39,6 +39,12 @@ class PredicateSpec(BaseModel):
     path: str
     op: PredicateOp
     value: float | str | None = None
+
+    @model_validator(mode="after")
+    def _threshold_needs_value(self) -> PredicateSpec:
+        if self.op != "on_change" and self.value is None:
+            raise ValueError(f"op {self.op!r} requires 'value'")
+        return self
 
 
 class CadenceSpec(BaseModel):
@@ -88,3 +94,18 @@ class WatchState(BaseModel):
     pid: int | None = None
     pgid: int | None = None
     proc_create_time: float | None = None
+
+
+class InvalidSpec(ValueError):
+    """A spec dict failed validation; tools map this to the INVALID_SPEC envelope."""
+
+
+_M = TypeVar("_M", bound=BaseModel)
+
+
+def parse(model: type[_M], data: dict) -> _M:
+    """Validate a dict into a spec model, raising InvalidSpec on failure."""
+    try:
+        return model.model_validate(data)
+    except ValidationError as err:
+        raise InvalidSpec(str(err)) from err

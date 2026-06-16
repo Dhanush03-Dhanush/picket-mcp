@@ -9,7 +9,9 @@ from __future__ import annotations
 
 from fastmcp import FastMCP
 
-from picket import __version__
+from picket import __version__, condition
+from picket.errors import ErrorCode, failure
+from picket.models import EndpointSpec, InvalidSpec, PredicateSpec, parse
 
 mcp = FastMCP("picket")
 
@@ -18,6 +20,22 @@ mcp = FastMCP("picket")
 def ping() -> dict:
     """Health check: confirm the Picket control plane is reachable."""
     return {"ok": True, "service": "picket", "version": __version__}
+
+
+@mcp.tool
+def test_predicate(endpoint: dict, predicate: dict) -> dict:
+    """Dry-run a spec: one fetch+extract+evaluate, no daemon and no state written.
+
+    endpoint: {url, method?, headers?, body?, auth_ref?}
+    predicate: {path, op (on_change|lt|gt|lte|gte|eq|ne), value?}
+    Returns response_excerpt, extracted_value, would_fire, extract_error.
+    """
+    try:
+        ep = parse(EndpointSpec, endpoint)
+        pr = parse(PredicateSpec, predicate)
+    except InvalidSpec as err:
+        return failure(ErrorCode.INVALID_SPEC, str(err))
+    return condition.run_test_predicate(ep, pr)
 
 
 def main() -> None:
