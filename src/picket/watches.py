@@ -1,7 +1,7 @@
 """Watch lifecycle (§10/§11/§12.1-12.4): arm, list, inspect, stop.
 
 The v0 control surface that ties the pieces together. arm_watch validates, does
-one trial observation (reusing test_predicate), persists the baseline + state,
+one trial fetch+extract (to capture the baseline), persists the baseline + state,
 spawns the detached daemon, and reads back the identity the daemon records.
 Liveness and stop use verify-before-kill (pid present AND psutil create_time
 matches) to guard against PID reuse.
@@ -87,6 +87,8 @@ def arm_watch(
     max_retries: int = 0,
     drift_policy: str = "block",
     notify_runbook: str | None = None,
+    skip_permissions: bool = False,
+    confirm_skip: bool = False,
 ) -> dict:
     """Validate, trial-observe, persist, and spawn a detached daemon for one watch."""
     try:
@@ -95,6 +97,11 @@ def arm_watch(
         cad = parse(CadenceSpec, cadence)
     except InvalidSpec as err:
         return failure(ErrorCode.INVALID_SPEC, str(err))
+
+    if skip_permissions and not confirm_skip:
+        return failure(
+            ErrorCode.PERMISSION_REQUIRED, "skip_permissions=true requires confirm_skip=true"
+        )
 
     if runbooks.read_runbook(runbook_id) is None:
         return failure(ErrorCode.RUNBOOK_NOT_FOUND, f"runbook {runbook_id!r} is not registered")
@@ -126,6 +133,7 @@ def arm_watch(
             max_retries=max_retries,
             drift_policy=drift_policy,
             notify_runbook=notify_runbook,
+            skip_permissions=skip_permissions,  # opt-in recorded on the state file
         )
     )
 

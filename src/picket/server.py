@@ -29,7 +29,8 @@ def test_predicate(endpoint: dict, predicate: dict) -> dict:
     """Dry-run a spec: one fetch+extract+evaluate, no daemon and no state written.
 
     endpoint: {url, method?, headers?, body?, auth_ref?}
-    predicate: {path, op (on_change|lt|gt|lte|gte|eq|ne), value?}
+    predicate: {path, op (on_change|lt|gt|lte|gte|eq|ne|pct_change|crosses_above|
+    crosses_below), value?, baseline_mode?}
     Returns response_excerpt, extracted_value, would_fire, extract_error.
     """
     try:
@@ -95,11 +96,15 @@ def arm_watch(
     max_retries: int = 0,
     drift_policy: str = "block",
     notify_runbook: str | None = None,
+    skip_permissions: bool = False,
+    confirm_skip: bool = False,
 ) -> dict:
     """Arm a watcher and spawn its detached daemon, then return immediately.
 
     endpoint/predicate/cadence are the §8 spec dicts; runbook_id must already be
-    registered. Returns watch_id, status, pid, pgid, baseline, trial_value.
+    registered. skip_permissions=true requires confirm_skip=true (high-stakes
+    bypass; see SECURITY in the README). Returns watch_id, status, pid, pgid,
+    baseline, trial_value.
     """
     return watches.arm_watch(
         runbook_id=runbook_id,
@@ -114,6 +119,8 @@ def arm_watch(
         max_retries=max_retries,
         drift_policy=drift_policy,
         notify_runbook=notify_runbook,
+        skip_permissions=skip_permissions,
+        confirm_skip=confirm_skip,
     )
 
 

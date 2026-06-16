@@ -81,7 +81,18 @@ def build_payload(state: WatchState, value: Any, fired_at: str) -> dict:
     }
 
 
-def handler_command(rb: runbooks.Runbook, inv: runbooks.Invocation, max_turns: int) -> list[str]:
+# Guardrails for the skip-permissions path. They MUST be --disallowedTools:
+# --allowedTools is ignored under bypassPermissions (§13/NEW-13).
+DEFAULT_DISALLOWED = ["Bash(rm:*)", "Bash(curl:*)", "Bash(sudo:*)"]
+
+
+def handler_command(
+    rb: runbooks.Runbook,
+    inv: runbooks.Invocation,
+    max_turns: int,
+    *,
+    skip_permissions: bool = False,
+) -> list[str]:
     """Build the launch command: direct script for exec, scoped claude -p for prompt."""
     if rb.type == "exec":
         return [str(inv.entry_path)]
@@ -89,8 +100,6 @@ def handler_command(rb: runbooks.Runbook, inv: runbooks.Invocation, max_turns: i
         _claude_bin(),
         "-p",
         inv.prompt_text or "",
-        "--permission-mode",
-        "dontAsk",
         "--max-turns",
         str(max_turns),
         "--output-format",
@@ -98,6 +107,9 @@ def handler_command(rb: runbooks.Runbook, inv: runbooks.Invocation, max_turns: i
         "--add-dir",
         str(store.runbook_dir(rb.id)),
     ]
+    if skip_permissions:  # consciously trusted: bypass prompts, defend with deny-list
+        return cmd + ["--dangerously-skip-permissions", "--disallowedTools", *DEFAULT_DISALLOWED]
+    cmd += ["--permission-mode", "dontAsk"]  # default: deny-by-default allowlist
     if rb.allowed_tools:
         cmd += ["--allowedTools", *rb.allowed_tools]
     return cmd
@@ -139,7 +151,7 @@ def fire(
     attempts = 1 + max(0, state.max_retries)
     with tempfile.TemporaryDirectory() as tmp:
         inv = runbooks.prepare_invocation(rb, payload, Path(tmp))
-        cmd = handler_command(rb, inv, max_turns)
+        cmd = handler_command(rb, inv, max_turns, skip_permissions=state.skip_permissions)
         status, res = "failed", None
         for attempt in range(attempts):
             try:
