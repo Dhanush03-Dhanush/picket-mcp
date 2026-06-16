@@ -48,13 +48,6 @@ def test_on_change_uses_baseline():
     assert condition.is_satisfied(pr, 6, baseline=None) is False  # nothing to compare yet
 
 
-def test_evaluate_fires_only_on_rising_edge():
-    pr = PredicateSpec(path="$.x", op="lt", value=10)
-    assert condition.evaluate(pr, 5, prev_satisfied=False) == (True, True)  # edge -> fire
-    assert condition.evaluate(pr, 5, prev_satisfied=True) == (True, False)  # held, no re-fire
-    assert condition.evaluate(pr, 15, prev_satisfied=True) == (False, False)  # fell back
-
-
 # --- fetch -----------------------------------------------------------------
 
 

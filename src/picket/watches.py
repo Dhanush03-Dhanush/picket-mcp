@@ -165,6 +165,26 @@ def get_watch(watch_id: str, log_lines: int = 20) -> dict:
     }
 
 
+def pause_watch(watch_id: str) -> dict:
+    """Halt polling without killing the daemon (baseline + history preserved)."""
+    return _send_control(watch_id, "pause")
+
+
+def resume_watch(watch_id: str) -> dict:
+    """Resume polling; the baseline is restored, never recomputed."""
+    return _send_control(watch_id, "resume")
+
+
+def _send_control(watch_id: str, command: str) -> dict:
+    state = store.read_watch(watch_id)
+    if state is None:
+        return failure(ErrorCode.NOT_FOUND, f"no watch {watch_id!r}")
+    if state.status == "stopped":
+        return failure(ErrorCode.ALREADY_STOPPED, f"{watch_id!r} is stopped")
+    store.write_control(watch_id, command)
+    return {"ok": True, "watch_id": watch_id, "requested": command}
+
+
 def stop_watch(watch_id: str, mode: str = "graceful") -> dict:
     """Verify-before-kill stop. Idempotent: a second call returns ALREADY_STOPPED.
 

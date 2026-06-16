@@ -122,6 +122,18 @@ def stop_watch(watch_id: str, mode: str = "graceful") -> dict:
     return watches.stop_watch(watch_id, mode)
 
 
+@mcp.tool
+def pause_watch(watch_id: str) -> dict:
+    """Pause polling (daemon stays alive; baseline and history preserved)."""
+    return watches.pause_watch(watch_id)
+
+
+@mcp.tool
+def resume_watch(watch_id: str) -> dict:
+    """Resume polling on a paused watch without recomputing the baseline."""
+    return watches.resume_watch(watch_id)
+
+
 def main() -> None:
     """Console entry point — run the server over stdio."""
     mcp.run()

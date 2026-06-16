@@ -86,6 +86,8 @@ class WatchState(BaseModel):
     last_observed_at: str | None = None
     last_error: str | None = None
     satisfied: bool = False
+    satisfied_since: str | None = None  # episode start, for debounce
+    fired_this_episode: bool = False  # one fire per satisfied episode
     heartbeat_at: str | None = None
     fire_count: int = 0
     last_fire_at: str | None = None

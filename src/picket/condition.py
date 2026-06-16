@@ -95,14 +95,6 @@ def is_satisfied(predicate: PredicateSpec, value: Any, baseline: Any = None) -> 
     }[predicate.op]
 
 
-def evaluate(
-    predicate: PredicateSpec, value: Any, prev_satisfied: bool, baseline: Any = None
-) -> tuple[bool, bool]:
-    """Return (now_satisfied, should_fire). Fires only on the unsatisfied->satisfied edge."""
-    now = is_satisfied(predicate, value, baseline)
-    return now, (now and not prev_satisfied)
-
-
 def _excerpt(data: Any, limit: int = 500) -> str:
     return json.dumps(data)[:limit]
 
@@ -123,8 +115,12 @@ def run_test_predicate(endpoint: EndpointSpec, predicate: PredicateSpec) -> dict
     try:
         satisfied = is_satisfied(predicate, value, baseline=None)
     except ObserveError as err:
-        return _result(would_fire=False, response_excerpt=excerpt, extracted_value=value,
-                       extract_error=str(err))
+        return _result(
+            would_fire=False,
+            response_excerpt=excerpt,
+            extracted_value=value,
+            extract_error=str(err),
+        )
 
     return _result(would_fire=satisfied, response_excerpt=excerpt, extracted_value=value)
 

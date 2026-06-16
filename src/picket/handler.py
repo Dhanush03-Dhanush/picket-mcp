@@ -103,6 +103,11 @@ def _result_is_error(stdout: str) -> bool:
         return False
 
 
+def record_skipped_overlap(state: WatchState) -> dict:
+    """A crossing arrived while a handler held the in-flight lock (overlap_policy=drop)."""
+    return _append_fire(state, f"fire_{uuid.uuid4().hex[:12]}", "skipped_overlap", now_iso())
+
+
 def _append_fire(
     state: WatchState,
     fire_id: str,

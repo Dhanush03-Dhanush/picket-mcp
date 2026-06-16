@@ -64,9 +64,9 @@ def test_v0_walking_skeleton_end_to_end(home, monkeypatch):
 
     monkeypatch.setattr(daemon, "spawn", fake_spawn)
 
-    assert _call(
-        "register_runbook", runbook_id="notify", runbook_type="exec", entry="run.sh"
-    ).data["ok"]
+    assert _call("register_runbook", runbook_id="notify", runbook_type="exec", entry="run.sh").data[
+        "ok"
+    ]
 
     armed = _call(
         "arm_watch",

@@ -147,6 +147,23 @@ def test_stop_watch_not_found(home):
     assert watches.stop_watch("wch_nope")["error_code"] == "NOT_FOUND"
 
 
+def test_pause_and_resume_write_control(home):
+    store.write_watch(_state("wch_p", status="active"))
+    assert watches.pause_watch("wch_p")["requested"] == "pause"
+    assert store.control_path("wch_p").read_text() == "pause"
+    assert watches.resume_watch("wch_p")["requested"] == "resume"
+    assert store.control_path("wch_p").read_text() == "resume"
+
+
+def test_pause_rejects_stopped_watch(home):
+    store.write_watch(_state("wch_s", status="stopped"))
+    assert watches.pause_watch("wch_s")["error_code"] == "ALREADY_STOPPED"
+
+
+def test_pause_not_found(home):
+    assert watches.pause_watch("wch_nope")["error_code"] == "NOT_FOUND"
+
+
 def test_verify_before_kill_rejects_reused_pid(home):
     state = _state("wch_r", pid=os.getpid(), pgid=os.getpgid(0), proc_create_time=1.0)
     assert watches.is_alive(state) is False  # create_time mismatch => not our process
