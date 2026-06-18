@@ -67,18 +67,23 @@ def _default_runner(cmd: list[str], *, timeout: float, env: dict) -> HandlerResu
         return HandlerResult(None, out or "", err or "", proc.pid, True)
 
 
-def build_payload(state: WatchState, value: Any, fired_at: str) -> dict:
-    """The trigger payload handed to the runbook (§7)."""
-    return {
+def build_payload(state: WatchState, value: Any, fired_at: str, extra: dict | None = None) -> dict:
+    """The trigger payload handed to the runbook (§7), shaped by the condition source."""
+    payload = {
         "watch_id": state.watch_id,
         "label": state.label,
         "runbook_id": state.runbook_id,
         "fired_at": fired_at,
         "value": value,
         "baseline": state.baseline,
-        "predicate": state.predicate.model_dump(),
-        "endpoint_url": state.endpoint.url,
     }
+    if state.probe_id:
+        payload["probe_id"] = state.probe_id
+        payload.update(extra or {})  # the probe-supplied payload
+    else:
+        payload["predicate"] = state.predicate.model_dump()
+        payload["endpoint_url"] = state.endpoint.url
+    return payload
 
 
 # Guardrails for the skip-permissions path. They MUST be --disallowedTools:
@@ -123,6 +128,7 @@ def fire(
     max_turns: int = 30,
     timeout: float = 600,
     sleeper: Callable[[float], None] = time.sleep,
+    payload_extra: dict | None = None,
 ) -> dict:
     """Launch the runbook with drift protection, retry-with-backoff, and dead-lettering."""
     runner = runner or _default_runner
@@ -147,7 +153,7 @@ def fire(
         _maybe_notify(state, "runbook drift blocked")
         return record
 
-    payload = build_payload(state, value, started)
+    payload = build_payload(state, value, started, payload_extra)
     attempts = 1 + max(0, state.max_retries)
     with tempfile.TemporaryDirectory() as tmp:
         inv = runbooks.prepare_invocation(rb, payload, Path(tmp))

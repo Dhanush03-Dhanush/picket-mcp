@@ -104,8 +104,10 @@ class WatchState(BaseModel):
     # spec + limits — written once by the server at arm time
     watch_id: str
     runbook_id: str
-    endpoint: EndpointSpec
-    predicate: PredicateSpec
+    endpoint: EndpointSpec | None = None  # condition source A: HTTP poll + predicate
+    predicate: PredicateSpec | None = None
+    probe_id: str | None = None  # condition source B: a probe script (mutually exclusive with A)
+    probe_params: dict = Field(default_factory=dict)
     cadence: CadenceSpec
     label: str | None = None
     status: WatchStatus = "active"
@@ -137,6 +139,13 @@ class WatchState(BaseModel):
     pid: int | None = None
     pgid: int | None = None
     proc_create_time: float | None = None
+
+    @model_validator(mode="after")
+    def _one_condition_source(self) -> WatchState:
+        has_endpoint = self.endpoint is not None and self.predicate is not None
+        if has_endpoint == bool(self.probe_id):
+            raise ValueError("a watch needs exactly one of (endpoint+predicate) or probe_id")
+        return self
 
 
 class InvalidSpec(ValueError):

@@ -19,6 +19,10 @@ class ErrorCode(StrEnum):
     PERMISSION_REQUIRED = "PERMISSION_REQUIRED"
     ENDPOINT_UNREACHABLE = "ENDPOINT_UNREACHABLE"
     ALREADY_STOPPED = "ALREADY_STOPPED"
+    PROBE_NOT_FOUND = "PROBE_NOT_FOUND"
+    # arm-time trial run errored (the probe analog of ENDPOINT_UNREACHABLE)
+    PROBE_FAILED = "PROBE_FAILED"
+    PROBE_DRIFT = "PROBE_DRIFT"
 
 
 def failure(code: ErrorCode, message: str) -> dict[str, Any]:

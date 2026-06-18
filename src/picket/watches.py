@@ -16,7 +16,7 @@ from datetime import UTC, datetime
 
 import psutil
 
-from picket import condition, daemon, runbooks, store
+from picket import condition, daemon, probes, runbooks, store
 from picket.condition import ObserveError
 from picket.errors import ErrorCode, failure
 from picket.models import (
@@ -76,9 +76,11 @@ def _await_identity(
 def arm_watch(
     *,
     runbook_id: str,
-    endpoint: dict,
-    predicate: dict,
+    endpoint: dict | None = None,
+    predicate: dict | None = None,
     cadence: dict,
+    probe_id: str | None = None,
+    probe_params: dict | None = None,
     label: str | None = None,
     max_fires: int | None = None,
     ttl_seconds: float | None = None,
@@ -92,11 +94,17 @@ def arm_watch(
 ) -> dict:
     """Validate, trial-observe, persist, and spawn a detached daemon for one watch."""
     try:
-        ep = parse(EndpointSpec, endpoint)
-        pr = parse(PredicateSpec, predicate)
         cad = parse(CadenceSpec, cadence)
+        ep = parse(EndpointSpec, endpoint) if endpoint else None
+        pr = parse(PredicateSpec, predicate) if predicate else None
     except InvalidSpec as err:
         return failure(ErrorCode.INVALID_SPEC, str(err))
+
+    use_probe = bool(probe_id)
+    if use_probe == bool(ep and pr):
+        return failure(
+            ErrorCode.INVALID_SPEC, "provide exactly one of (endpoint+predicate) or probe_id"
+        )
 
     if skip_permissions and not confirm_skip:
         return failure(
@@ -106,12 +114,22 @@ def arm_watch(
     if runbooks.read_runbook(runbook_id) is None:
         return failure(ErrorCode.RUNBOOK_NOT_FOUND, f"runbook {runbook_id!r} is not registered")
 
-    try:
-        trial_data = condition.fetch(ep)
-        trial_value = condition.extract(trial_data, pr.path)
-        baseline = condition.initial_baseline(pr, trial_value, trial_data)
-    except ObserveError as err:
-        return failure(ErrorCode.ENDPOINT_UNREACHABLE, str(err))
+    if use_probe:
+        probe = probes.read_probe(probe_id)
+        if probe is None:
+            return failure(ErrorCode.PROBE_NOT_FOUND, f"probe {probe_id!r} is not registered")
+        try:
+            trial_value = probes.run_probe(probe, probe_params or {}).value
+        except probes.ProbeError as err:
+            return failure(ErrorCode.PROBE_FAILED, str(err))
+        baseline = None
+    else:
+        try:
+            trial_data = condition.fetch(ep)
+            trial_value = condition.extract(trial_data, pr.path)
+            baseline = condition.initial_baseline(pr, trial_value, trial_data)
+        except ObserveError as err:
+            return failure(ErrorCode.ENDPOINT_UNREACHABLE, str(err))
 
     watch_id = store.new_watch_id()
     store.ensure_root()
@@ -121,6 +139,8 @@ def arm_watch(
             runbook_id=runbook_id,
             endpoint=ep,
             predicate=pr,
+            probe_id=probe_id,
+            probe_params=probe_params or {},
             cadence=cad,
             label=label,
             status="active",
@@ -172,6 +192,7 @@ def list_watches(status_filter: str = "all") -> dict:
                 "label": state.label,
                 "status": status,
                 "runbook_id": state.runbook_id,
+                "source": f"probe:{state.probe_id}" if state.probe_id else "endpoint",
                 "cadence_summary": f"every {state.cadence.interval_seconds:g}s",
                 "fire_count": state.fire_count,
                 "last_observed_at": state.last_observed_at,
