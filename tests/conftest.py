@@ -7,7 +7,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
-from picket import runbooks, store, watches
+from picket import probes, runbooks, store, watches
 
 
 @pytest.fixture
@@ -84,6 +84,19 @@ def exec_runbook(home):
         script.write_text(body)
         script.chmod(0o755)
         runbooks.register_runbook(rb_id, runbook_type="exec", entry="run.sh")
+
+    return _make
+
+
+@pytest.fixture
+def probe(home):
+    """Factory: register a python probe (condition script) from a body."""
+
+    def _make(body, probe_id="pr"):
+        d = home / "probes" / probe_id
+        d.mkdir(parents=True)
+        (d / "probe.py").write_text(body)
+        probes.register_probe(probe_id, language="python", entry="probe.py")
 
     return _make
 

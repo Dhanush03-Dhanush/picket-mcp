@@ -11,7 +11,7 @@ from typing import Literal
 
 from fastmcp import FastMCP
 
-from picket import __version__, audit, condition, runbooks, watches
+from picket import __version__, audit, condition, probes, runbooks, watches
 from picket.errors import ErrorCode, failure
 from picket.models import EndpointSpec, InvalidSpec, PredicateSpec, parse
 
@@ -39,6 +39,19 @@ def test_predicate(endpoint: dict, predicate: dict) -> dict:
     except InvalidSpec as err:
         return failure(ErrorCode.INVALID_SPEC, str(err))
     return condition.run_test_predicate(ep, pr)
+
+
+@mcp.tool
+def test_probe(probe_id: str, probe_params: dict | None = None) -> dict:
+    """Dry-run a probe: one execution with probe_params, no daemon and no state written.
+
+    Returns would_fire, value, payload, and error (a non-zero exit / timeout /
+    unparseable stdout becomes a never-fire probe-error reported in `error`).
+    """
+    probe = probes.read_probe(probe_id)
+    if probe is None:
+        return failure(ErrorCode.PROBE_NOT_FOUND, f"probe {probe_id!r} is not registered")
+    return probes.run_test_probe(probe, probe_params or {})
 
 
 @mcp.tool
@@ -83,11 +96,43 @@ def install_default_runbooks() -> dict:
 
 
 @mcp.tool
+def register_probe(
+    probe_id: str,
+    language: Literal["python", "sh"],
+    entry: str,
+    description: str = "",
+    version: int = 1,
+) -> dict:
+    """Register a probe (condition script) from files a human placed under probes/<id>/.
+
+    Never accepts a script body — only metadata + the entry path (validated to be
+    inside the probe dir). Computes content_hash and writes probe.toml. The script
+    prints {fire, value?, payload?} JSON on its last stdout line; a non-zero exit
+    or unparseable output is a probe-error that never fires.
+    """
+    try:
+        p = probes.register_probe(
+            probe_id, language=language, entry=entry, description=description, version=version
+        )
+    except InvalidSpec as err:
+        return failure(ErrorCode.INVALID_SPEC, str(err))
+    return {"ok": True, **p.model_dump()}
+
+
+@mcp.tool
+def list_probes() -> dict:
+    """List registered probes (id, language, entry, description, content_hash, version)."""
+    return {"ok": True, "probes": probes.list_probes()}
+
+
+@mcp.tool
 def arm_watch(
     runbook_id: str,
-    endpoint: dict,
-    predicate: dict,
     cadence: dict,
+    endpoint: dict | None = None,
+    predicate: dict | None = None,
+    probe_id: str | None = None,
+    probe_params: dict | None = None,
     label: str | None = None,
     max_fires: int | None = None,
     ttl_seconds: float | None = None,
@@ -101,16 +146,19 @@ def arm_watch(
 ) -> dict:
     """Arm a watcher and spawn its detached daemon, then return immediately.
 
-    endpoint/predicate/cadence are the §8 spec dicts; runbook_id must already be
-    registered. skip_permissions=true requires confirm_skip=true (high-stakes
-    bypass; see SECURITY in the README). Returns watch_id, status, pid, pgid,
-    baseline, trial_value.
+    Provide exactly one condition source: an endpoint+predicate (§8 spec dicts) OR
+    a probe_id (a registered probe script, with optional probe_params). runbook_id
+    must already be registered. skip_permissions=true requires confirm_skip=true
+    (high-stakes bypass; see SECURITY in the README). Returns watch_id, status,
+    pid, pgid, baseline, trial_value.
     """
     return watches.arm_watch(
         runbook_id=runbook_id,
         endpoint=endpoint,
         predicate=predicate,
         cadence=cadence,
+        probe_id=probe_id,
+        probe_params=probe_params,
         label=label,
         max_fires=max_fires,
         ttl_seconds=ttl_seconds,

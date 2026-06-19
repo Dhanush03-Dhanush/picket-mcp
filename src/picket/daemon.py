@@ -21,7 +21,7 @@ from zoneinfo import ZoneInfo
 
 import psutil
 
-from picket import condition, handler, store
+from picket import condition, handler, probes, store
 from picket.condition import ObserveError
 from picket.models import CadenceSpec, WatchState
 from picket.store import now_iso
@@ -75,11 +75,16 @@ def poll_once(state: WatchState) -> WatchState:
     now = now_iso()
     state.heartbeat_at = now
     state.last_observed_at = now
+    probe_payload = None
     try:
-        data = condition.fetch(state.endpoint)
-        value = condition.extract(data, state.predicate.path)
-        now_satisfied = condition.is_satisfied(state.predicate, value, state.baseline)
-    except ObserveError as err:
+        if state.probe_id:  # condition source B: the probe owns the decision
+            result = probes.observe(state)
+            value, now_satisfied, probe_payload = result.value, result.fire, result.payload
+        else:  # condition source A: fetch + extract + predicate
+            data = condition.fetch(state.endpoint)
+            value = condition.extract(data, state.predicate.path)
+            now_satisfied = condition.is_satisfied(state.predicate, value, state.baseline)
+    except (ObserveError, probes.ProbeError) as err:
         state.last_error = str(err)  # could-not-observe != change: never fires
         _log(state, f"observe-error: {err}")
         store.write_watch(state)
@@ -103,19 +108,22 @@ def poll_once(state: WatchState) -> WatchState:
         else:
             try:
                 _log(state, f"FIRE -> runbook {state.runbook_id}")
-                handler.fire(state, value, timeout=state.handler_timeout_seconds)
+                handler.fire(
+                    state, value, timeout=state.handler_timeout_seconds, payload_extra=probe_payload
+                )
             finally:
                 fcntl.flock(lock, fcntl.LOCK_UN)
                 lock.close()
             state.fire_count += 1
             state.last_fire_at = now
             state.fired_this_episode = True
-            if state.predicate.op == "on_change":
+            if state.predicate and state.predicate.op == "on_change":
                 state.baseline = value  # re-arm against the new value
                 now_satisfied = False
                 state.satisfied_since = None
-    if state.predicate.op == "pct_change" and state.predicate.baseline_mode == "last_value":
-        state.baseline = value  # track the prior poll for per-interval % change
+    if state.predicate and state.predicate.op == "pct_change":
+        if state.predicate.baseline_mode == "last_value":
+            state.baseline = value  # track the prior poll for per-interval % change
     state.satisfied = now_satisfied
     store.write_watch(state)
     return state

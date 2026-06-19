@@ -99,6 +99,38 @@ def test_smoke_conditional_daemon_fires_once(
     assert poll_until(lambda: store.read_watch(res["watch_id"]).status == "stopped")
 
 
+def test_smoke_probe_daemon_fires_real_exec_handler_then_self_stops(
+    smoke_home, probe, exec_runbook, poll_until
+):
+    """A real detached daemon runs a REAL probe script each tick; when the probe returns
+    fire=true the exec runbook fires once (max_fires=1) and the watcher self-stops. The
+    probe's payload reaches the runbook via PICKET_PAYLOAD (probe_id in the trigger)."""
+    trigger = smoke_home / "trigger.flag"
+    marker = smoke_home / "probe_fired.txt"
+    probe(
+        "import json, os\n"
+        "p = json.loads(os.environ['PICKET_PARAMS'])\n"
+        "fire = os.path.exists(p['trigger_file'])\n"
+        "print(json.dumps({'fire': fire, 'value': fire, 'payload': {'src': 'probe'}}))\n"
+    )
+    exec_runbook(f'#!/bin/sh\nprintf "%s" "$PICKET_PAYLOAD" > "{marker}"\n')
+
+    res = watches.arm_watch(
+        runbook_id="rb",
+        probe_id="pr",
+        probe_params={"trigger_file": str(trigger)},
+        cadence={"interval_seconds": 0.2},
+        max_fires=1,
+    )
+    assert res["ok"] and psutil.pid_exists(res["pid"])
+
+    trigger.touch()  # the real daemon's next probe run now returns fire=true
+    assert poll_until(lambda: store.read_jsonl(store.fires_path(res["watch_id"])))
+    assert store.read_jsonl(store.fires_path(res["watch_id"]))[-1]["status"] == "completed"
+    assert marker.exists() and "probe_id" in marker.read_text()  # probe payload reached runbook
+    assert poll_until(lambda: store.read_watch(res["watch_id"]).status == "stopped")  # max_fires=1
+
+
 def test_smoke_public_api_monitor_fires_once_and_cleans_up(smoke_home, exec_runbook, poll_until):
     """Mimic "watch the SPX endpoint, run my runbook on the condition" against a real,
     no-auth public API. The predicate (price > 0) is guaranteed true so this one-shot

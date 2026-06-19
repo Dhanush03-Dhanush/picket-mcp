@@ -16,7 +16,8 @@ runs **one** pre-registered runbook with the trigger payload, and then exits.
 [Install](#install) · [Register](#register-with-claude-code) ·
 [Quick start](#quick-start) · [Concepts](#concepts)
 ([watches](#watches--lifecycle) · [predicates](#predicates) ·
-[cadence](#cadence) · [runbooks](#runbooks) · [fires](#fires--the-audit-trail) ·
+[cadence](#cadence) · [probes](#probes--scriptable-conditions) ·
+[runbooks](#runbooks) · [fires](#fires--the-audit-trail) ·
 [limits](#limits--gating) · [resilience](#resilience)) ·
 [Tool reference](#tool-reference) · [Configuration](#configuration) ·
 [Error codes](#error-codes) · [Security](#security) · [Testing](#testing) ·
@@ -55,7 +56,7 @@ source of truth, there is no database:
 | Process | What it is | Role |
 | --- | --- | --- |
 | **Control plane** | the FastMCP stdio server (`picket.server`) | Fast request/response: arm / list / inspect / pause / stop / audit. Never polls, never hosts the wait. May die with the session — nothing is lost because state is on disk. |
-| **Runtime** | one detached daemon per active watcher (`python -m picket.daemon <id>`) | double-fork + `setsid` so closing the session doesn't `SIGHUP` it. Polls, extracts, evaluates vs a persisted baseline, fires. Pure Python — no model in the loop. |
+| **Runtime** | one detached daemon per active watcher (`python -m picket.daemon <id>`) | double-fork + `setsid` so closing the session doesn't `SIGHUP` it. Polls, extracts, evaluates vs a persisted baseline (or runs a registered probe script), fires. Pure Python — no model in the loop. |
 | **Handler** | an ephemeral headless `claude -p` (or a script, for `exec` runbooks) | Runs one runbook and exits. The daemon supervises it: timeout, output capture, retry, dead-letter. |
 
 ### On-disk layout
@@ -67,6 +68,7 @@ $PICKET_HOME/
   watches/<id>.json      watch state (daemon-owned; the server writes it once at arm)
   watches/<id>.control   server→daemon channel: stop | pause | resume
   runbooks/<id>/         human-placed runbook files + runbook.toml (registered by id)
+  probes/<id>/           human-placed probe script + probe.toml (a custom condition)
   fires/<id>.jsonl       append-only fire records (the audit trail)
   logs/<id>.log          size-capped, rotating poll/debug log
   locks/<id>.lock        in-flight handler lock (at most one handler per watcher)
@@ -150,6 +152,19 @@ get_fire_log(watch_id="wch_...")     # "did it fire, and what happened?"
 stop_watch(watch_id="wch_...")       # graceful stop (idempotent)
 ```
 
+**Probe variant** — when the condition needs real logic, swap the
+endpoint+predicate for a registered script. Place
+`probes/price-drop/probe.py` (it prints `{"fire": …, "value": …, "payload": …}`),
+then arm with a `probe_id` instead:
+
+```text
+register_probe(probe_id="price-drop", language="python", entry="probe.py")
+test_probe(probe_id="price-drop", probe_params={"symbol": "SPX", "floor": 5400})
+arm_watch(runbook_id="spx-analysis", probe_id="price-drop",
+          probe_params={"symbol": "SPX", "floor": 5400},
+          cadence={"interval_seconds": 240}, max_fires=1)
+```
+
 ## Concepts
 
 ### Watches & lifecycle
@@ -212,6 +227,59 @@ daemon restart restores it rather than recomputing.
 
 > Picket polls; it cannot see a sub-interval crossing, and a daemon that is down
 > cannot observe one. Choose `interval_seconds` accordingly.
+
+### Probes — scriptable conditions
+
+A predicate covers "fetch JSON, extract a field, compare it." When the condition
+is more than that — multiple endpoints, a computation, custom auth, a non-JSON
+source — arm the watch with a **probe** instead. A probe is a registered script
+the daemon runs **in place of** the endpoint+predicate, on the same cadence. A
+watch has **exactly one** condition source: an `endpoint`+`predicate` **or** a
+`probe_id` — never both, never neither.
+
+Like a runbook, a probe lives under `probes/<id>/`, is referenced **by id** (its
+code is never a tool parameter), and is content-hashed + drift-checked. It is
+**`python`** or **`sh`** (declared in the manifest) and prints **one JSON object
+on its last stdout line**:
+
+```json
+{"fire": true, "value": 5402.3, "payload": {"symbol": "SPX"}}
+```
+
+- **`fire`** (bool, the only required field) — `true` is the satisfied signal,
+  fed into the *same* edge / debounce / cooldown / once-per-episode gating a
+  predicate uses (it fires on the unsatisfied→satisfied transition, once per
+  episode).
+- **`value`** — recorded as `last_value` and handed to the next run as
+  `PICKET_LAST_VALUE` (one-tick memory for "changed since last time" logic).
+- **`payload`** — merged into the trigger payload delivered to the runbook.
+
+**Exit code is the error channel.** Exit `0` means *evaluated*. A non-zero exit,
+a timeout (30s), or unparseable stdout is a **probe-error**: logged as
+`last_error` and **never a fire** — exactly like an endpoint observe-error.
+
+**Inputs.** At arm time, `probe_params` (a JSON object) reaches the script as the
+`PICKET_PARAMS` env var **and** a `PICKET_PARAMS_FILE` path; the script also gets
+`PICKET_LAST_VALUE` and `PICKET_WATCH_ID`. Secrets follow the endpoint model —
+reference an **env-var name**, never a literal; the daemon inherits the arming
+session's environment. One registered probe is reusable across watches with
+different `probe_params`.
+
+`probe.toml` (written by Picket):
+
+```toml
+id = "price-drop"
+language = "python"
+entry = "probe.py"
+description = "..."
+content_hash = "sha256:…"
+version = 1
+```
+
+> A probe is arbitrary code Picket runs unattended on a timer, so it carries the
+> same trust weight as a runbook: a human places the files, and the fire-time
+> drift check (`drift_policy`, default `block`) refuses a probe whose entry
+> changed since registration.
 
 ### Runbooks
 
@@ -311,16 +379,26 @@ All tools return either `{"ok": true, …}` or the failure envelope
 - `list_runbooks()` → `{ok, runbooks:[{runbook_id, type, entry, description, declared_tools, content_hash, version}]}`.
 - `install_default_runbooks()` — ship + register the macOS notifier `picket-notify`.
 
+**Probes**
+- `register_probe(probe_id, language, entry, description="", version=1)` — register a
+  condition script placed under `probes/<id>/`; computes `content_hash`. Never accepts
+  code. → the probe record.
+- `list_probes()` → `{ok, probes:[{probe_id, language, entry, description, content_hash, version}]}`.
+
 **Dry run**
 - `test_predicate(endpoint, predicate)` — one fetch+extract+evaluate, **no daemon,
   no state**. → `{ok, would_fire, extracted_value, response_excerpt, extract_error}`.
+- `test_probe(probe_id, probe_params=None)` — one probe execution, **no daemon, no
+  state**. → `{ok, would_fire, value, payload, error}`.
 
 **Lifecycle**
-- `arm_watch(runbook_id, endpoint, predicate, cadence, label=None, max_fires=None,
-  ttl_seconds=None, debounce_seconds=0, cooldown_seconds=0, max_retries=0,
-  drift_policy="block", notify_runbook=None, skip_permissions=False,
-  confirm_skip=False)` — validate, do a trial observation (captures the baseline),
-  persist state, spawn the detached daemon, read back its identity.
+- `arm_watch(runbook_id, cadence, endpoint=None, predicate=None, probe_id=None,
+  probe_params=None, label=None, max_fires=None, ttl_seconds=None,
+  debounce_seconds=0, cooldown_seconds=0, max_retries=0, drift_policy="block",
+  notify_runbook=None, skip_permissions=False, confirm_skip=False)` — provide
+  **exactly one** condition source (`endpoint`+`predicate` **or** `probe_id`).
+  Validate, do a trial observation / probe-run (captures the baseline), persist
+  state, spawn the detached daemon, read back its identity.
   → `{ok, watch_id, status, pid, pgid, baseline, trial_value}`.
 - `list_watches(status_filter="all")` — `all|active|paused|stopped|errored`; each
   row has `{watch_id, label, status, runbook_id, cadence_summary, fire_count,
@@ -360,6 +438,9 @@ All tools return either `{"ok": true, …}` or the failure envelope
 | `RUNBOOK_NOT_FOUND` | `arm_watch` referenced an unregistered runbook |
 | `RUNBOOK_DRIFT` | the entry changed since registration (drift `block` policy) |
 | `ENDPOINT_UNREACHABLE` | the arm-time trial fetch/extract failed |
+| `PROBE_NOT_FOUND` | `arm_watch` referenced an unregistered probe |
+| `PROBE_FAILED` | the arm-time trial probe run errored (probe analog of `ENDPOINT_UNREACHABLE`) |
+| `PROBE_DRIFT` | the probe entry changed since registration (drift `block` policy) |
 | `DAEMON_SPAWN_FAILED` | the daemon didn't start or never reported its identity |
 | `NOT_FOUND` | no such watch |
 | `ALREADY_STOPPED` | `stop_watch` on an already-stopped watch (idempotent) |
@@ -421,7 +502,8 @@ The two **opt-in** suites exercise the real seams the unit tests mock — a real
 detached daemon polling a real HTTP server and firing a real handler. Both
 self-limit (`max_fires=1`) and self-clean (a temp `PICKET_HOME` and a teardown that
 stops and reaps every daemon). `-m smoke` covers the conditional predicates
-(`pct_change`, `crosses_above`, `on_change`) and a live **public-API monitor**
+(`pct_change`, `crosses_above`, `on_change`), a **probe-driven watch** (a real
+daemon running a real probe script that fires once), and a live **public-API monitor**
 (Coinbase BTC spot — the SPX example shape against a real, no-auth endpoint;
 skipped if unreachable). `-m claude_smoke` skips cleanly when `claude` isn't on
 `PATH`. Both are deselected from the default run.
@@ -437,6 +519,7 @@ src/picket/
   store.py      PICKET_HOME, paths, atomic JSON, JSONL, rotating logs, control channel
   condition.py  fetch (httpx + auth_ref) · extract (jsonpath) · is_satisfied · baselines
   runbooks.py   runbook.toml, register/list, content_hash, payload + invocation dispatch
+  probes.py     probe.toml, register/list, run (parse {fire,value,payload}), drift, dry-run
   handler.py    launch (scoped claude -p / exec), supervise, drift, retry, fire records
   daemon.py     python -m picket.daemon: detach, poll loop, gating, control, limits
   watches.py    arm / list / get / stop / pause / resume / stop_all, verify-before-kill

@@ -27,7 +27,7 @@ from typing import Any
 
 from picket.models import WatchState
 
-SUBDIRS = ("watches", "runbooks", "fires", "logs", "locks")
+SUBDIRS = ("watches", "runbooks", "probes", "fires", "logs", "locks")
 
 
 def now_iso() -> str:
@@ -71,6 +71,10 @@ def lock_path(watch_id: str) -> Path:
 
 def runbook_dir(runbook_id: str) -> Path:
     return picket_home() / "runbooks" / runbook_id
+
+
+def probe_dir(probe_id: str) -> Path:
+    return picket_home() / "probes" / probe_id
 
 
 def new_watch_id() -> str:
