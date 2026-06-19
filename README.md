@@ -59,6 +59,10 @@ source of truth, there is no database:
 | **Runtime** | one detached daemon per active watcher (`python -m picket.daemon <id>`) | double-fork + `setsid` so closing the session doesn't `SIGHUP` it. Polls, extracts, evaluates vs a persisted baseline (or runs a registered probe script), fires. Pure Python — no model in the loop. |
 | **Handler** | an ephemeral headless `claude -p` (or a script, for `exec` runbooks) | Runs one runbook and exits. The daemon supervises it: timeout, output capture, retry, dead-letter. |
 
+> A full component-and-flow diagram is in
+> [`docs/picket-architecture.drawio`](docs/picket-architecture.drawio) — open with
+> [diagrams.net](https://app.diagrams.net) or the VS Code draw.io extension.
+
 ### On-disk layout
 
 Root is `~/.claude/picket/` (override with `PICKET_HOME`), created on first use:
