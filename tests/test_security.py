@@ -85,11 +85,12 @@ def test_auth_ref_leaves_no_literal_credential_on_disk(home, monkeypatch):
     res = watches.arm_watch(runbook_id="rb", endpoint=EP, predicate=PR, cadence=CAD)
     assert res["ok"]
 
+    # the literal secret value is never written anywhere under the root (incl. the DB)
     for path in home.rglob("*"):
         if path.is_file():
-            assert secret not in path.read_text(errors="ignore")
+            assert secret not in path.read_bytes().decode("utf-8", "ignore")
     # only the env-var NAME is persisted, never the value
-    assert "SECRET_TOKEN" in store.watch_path(res["watch_id"]).read_text()
+    assert store.read_watch(res["watch_id"]).endpoint.auth_ref == "SECRET_TOKEN"
 
 
 def test_build_payload_carries_no_credential():

@@ -84,10 +84,13 @@ def is_satisfied(predicate: PredicateSpec, value: Any, baseline: Any = None) -> 
         return baseline is not None and value != baseline
 
     if predicate.op == "pct_change":
-        if not baseline:  # None or 0: nothing to measure against
+        # Coerce a numeric-string baseline (common in financial APIs) so a
+        # "prior_close" of "4900" measures correctly instead of crashing the daemon.
+        base = _as_target_type(baseline, 0.0) if baseline is not None else 0.0
+        if not base:  # None, 0, or "0": nothing to measure against
             return False
-        pct = (_as_target_type(value, 0.0) - baseline) / baseline * 100
-        threshold = predicate.value
+        pct = (_as_target_type(value, 0.0) - base) / base * 100
+        threshold = float(predicate.value)
         return pct <= threshold if threshold < 0 else pct >= threshold
 
     target = predicate.value
@@ -136,8 +139,11 @@ def run_test_predicate(endpoint: EndpointSpec, predicate: PredicateSpec) -> dict
     except ObserveError as err:
         return _result(would_fire=False, response_excerpt=excerpt, extract_error=str(err))
 
+    # Evaluate against the baseline arm would capture, so a dry run of a stateful
+    # op (pct_change / on_change) reflects the real first-poll decision.
     try:
-        satisfied = is_satisfied(predicate, value, baseline=None)
+        baseline = initial_baseline(predicate, value, data)
+        satisfied = is_satisfied(predicate, value, baseline=baseline)
     except ObserveError as err:
         return _result(
             would_fire=False,
@@ -146,14 +152,19 @@ def run_test_predicate(endpoint: EndpointSpec, predicate: PredicateSpec) -> dict
             extract_error=str(err),
         )
 
-    return _result(would_fire=satisfied, response_excerpt=excerpt, extracted_value=value)
+    return _result(
+        would_fire=satisfied, response_excerpt=excerpt, extracted_value=value, baseline=baseline
+    )
 
 
-def _result(*, would_fire, response_excerpt=None, extracted_value=None, extract_error=None) -> dict:
+def _result(
+    *, would_fire, response_excerpt=None, extracted_value=None, extract_error=None, baseline=None
+) -> dict:
     return {
         "ok": True,
         "would_fire": would_fire,
         "extracted_value": extracted_value,
+        "baseline": baseline,
         "response_excerpt": response_excerpt,
         "extract_error": extract_error,
     }

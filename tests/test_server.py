@@ -20,6 +20,17 @@ def test_ping_returns_well_formed_dict():
     assert result.data == {"ok": True, "service": "picket", "version": "0.1.0"}
 
 
+def test_doctor_tool_reports_readiness(home):
+    data = _call("doctor").data
+    assert "claude_on_path" in data and data["picket_home"] == str(home)
+    assert data["db"].endswith("picket.db") and data["home_writable"] is True
+
+
+def test_reconcile_tool_runs(home):
+    data = _call("reconcile").data
+    assert data["ok"] and data["restarted"] == [] and "recovered" in data
+
+
 def test_test_predicate_tool_runs(monkeypatch):
     from picket import condition
 

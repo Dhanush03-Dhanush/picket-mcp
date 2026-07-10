@@ -15,23 +15,17 @@ def _watch(watch_id):
 
 
 def test_get_fire_log_across_watchers_sorted_and_limited(home):
-    store.append_jsonl(
-        store.fires_path("wch_a"), {"fire_id": "a1", "started_at": "2026-01-01T00:00:00"}
-    )
-    store.append_jsonl(
-        store.fires_path("wch_b"), {"fire_id": "b1", "started_at": "2026-03-01T00:00:00"}
-    )
-    store.append_jsonl(
-        store.fires_path("wch_a"), {"fire_id": "a2", "started_at": "2026-02-01T00:00:00"}
-    )
+    store.create_fire("a1", "wch_a", "completed")
+    store.create_fire("b1", "wch_b", "completed")
+    store.create_fire("a2", "wch_a", "completed")  # newest
 
     fires = audit.get_fire_log(limit=2)["fires"]
-    assert [f["fire_id"] for f in fires] == ["b1", "a2"]  # newest first, limited
+    assert [f["fire_id"] for f in fires] == ["a2", "b1"]  # newest first, limited
 
 
 def test_get_fire_log_single_watch(home):
-    store.append_jsonl(store.fires_path("wch_a"), {"fire_id": "a1", "started_at": "2026-01-01"})
-    store.append_jsonl(store.fires_path("wch_b"), {"fire_id": "b1", "started_at": "2026-01-01"})
+    store.create_fire("a1", "wch_a", "completed")
+    store.create_fire("b1", "wch_b", "completed")
     fires = audit.get_fire_log(watch_id="wch_a")["fires"]
     assert [f["fire_id"] for f in fires] == ["a1"]
 

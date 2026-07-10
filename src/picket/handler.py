@@ -1,10 +1,13 @@
-"""The handler (§4C/§9): launch one runbook at fire time, then record the fire.
+"""The handler: execute one runbook for a durable fire, record it, then deliver.
 
-prompt runbooks run as a scoped, non-interactive ``claude -p`` (deny-by-default:
-``--permission-mode dontAsk`` + an explicit ``--allowedTools`` allowlist, so a
-tool that isn't listed is refused, never awaited). exec runbooks run their script
-directly — no LLM, no tokens. Either way a record is appended to fires/<id>.jsonl.
-Per §16.4 there is no --max-budget-usd; runaways are bounded by --max-turns.
+A fire row exists in the ledger (status ``running``) *before* the runbook
+launches, so a crash mid-flight leaves a durable record with a stable
+idempotency key rather than a silent side effect. ``run_fire`` drift-checks
+against the revision pinned at arm, launches a scoped ``claude -p`` (prompt) or
+the script (exec) with retry/backoff, writes the full output to
+``results/<fire_id>.json``, transitions the fire to a terminal status, and runs
+the delivery sink for any subscribed outcome — success included, which closes
+the "watch → act → tell me" loop.
 """
 
 from __future__ import annotations
@@ -16,7 +19,6 @@ import signal
 import subprocess
 import tempfile
 import time
-import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,6 +29,7 @@ from picket.models import WatchState
 from picket.store import now_iso
 
 _TRANSCRIPT_TAIL = 2000
+_RESULT_MAX = 256_000  # bound the stored result artifact
 
 
 @dataclass
@@ -45,8 +48,15 @@ def _claude_bin() -> str:
     return shutil.which("claude") or "claude"
 
 
-def _default_runner(cmd: list[str], *, timeout: float, env: dict) -> HandlerResult:
-    """Run the handler in its own session, capturing output and killing the group on timeout."""
+def _kill_group(pid: int) -> None:
+    try:
+        os.killpg(os.getpgid(pid), signal.SIGKILL)
+    except (ProcessLookupError, OSError):
+        pass
+
+
+def _default_runner(cmd: list[str], *, timeout: float, env: dict, on_start=None) -> HandlerResult:
+    """Run the handler in its own session; report its pid so a stop can cancel the group."""
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -55,22 +65,35 @@ def _default_runner(cmd: list[str], *, timeout: float, env: dict) -> HandlerResu
         env=env,
         start_new_session=True,
     )
+    if on_start:
+        on_start(proc.pid)
     try:
         out, err = proc.communicate(timeout=timeout)
         return HandlerResult(proc.returncode, out, err, proc.pid, False)
     except subprocess.TimeoutExpired:
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except (ProcessLookupError, OSError):
-            proc.kill()
+        _kill_group(proc.pid)
         out, err = proc.communicate()
         return HandlerResult(None, out or "", err or "", proc.pid, True)
 
 
-def build_payload(state: WatchState, value: Any, fired_at: str, extra: dict | None = None) -> dict:
-    """The trigger payload handed to the runbook (§7), shaped by the condition source."""
+def build_payload(
+    state: WatchState,
+    value: Any,
+    fired_at: str,
+    *,
+    fire_id: str | None = None,
+    extra: dict | None = None,
+) -> dict:
+    """The trigger payload handed to the runbook, shaped by the condition source.
+
+    Carries ``fire_id`` and a stable ``idempotency_key`` so a runbook can refuse
+    to act twice on the same fire. Probe-supplied fields are untrusted: they may
+    add keys but can never overwrite the core fields.
+    """
     payload = {
         "watch_id": state.watch_id,
+        "fire_id": fire_id,
+        "idempotency_key": f"{state.watch_id}:{state.episode_seq}",
         "label": state.label,
         "runbook_id": state.runbook_id,
         "fired_at": fired_at,
@@ -79,7 +102,8 @@ def build_payload(state: WatchState, value: Any, fired_at: str, extra: dict | No
     }
     if state.probe_id:
         payload["probe_id"] = state.probe_id
-        payload.update(extra or {})  # the probe-supplied payload
+        for k, v in (extra or {}).items():  # untrusted: may add, must not overwrite core
+            payload.setdefault(k, v)
     else:
         payload["predicate"] = state.predicate.model_dump()
         payload["endpoint_url"] = state.endpoint.url
@@ -87,7 +111,7 @@ def build_payload(state: WatchState, value: Any, fired_at: str, extra: dict | No
 
 
 # Guardrails for the skip-permissions path. They MUST be --disallowedTools:
-# --allowedTools is ignored under bypassPermissions (§13/NEW-13).
+# --allowedTools is ignored under bypassPermissions.
 DEFAULT_DISALLOWED = ["Bash(rm:*)", "Bash(curl:*)", "Bash(sudo:*)"]
 
 
@@ -130,40 +154,62 @@ def fire(
     sleeper: Callable[[float], None] = time.sleep,
     payload_extra: dict | None = None,
 ) -> dict:
-    """Launch the runbook with drift protection, retry-with-backoff, and dead-lettering."""
+    """Create a durable fire row, then execute it. Standalone convenience for callers
+    that are not the daemon worker (tests, one-off runs)."""
+    fire_id = store.new_fire_id()
+    store.create_fire(fire_id, state.watch_id, "running", runbook_id=state.runbook_id, value=value)
+    return run_fire(
+        state,
+        value,
+        fire_id,
+        runner=runner,
+        max_turns=max_turns,
+        timeout=timeout,
+        sleeper=sleeper,
+        payload_extra=payload_extra,
+    )
+
+
+def run_fire(
+    state: WatchState,
+    value: Any,
+    fire_id: str,
+    *,
+    runner: Runner | None = None,
+    max_turns: int = 30,
+    timeout: float = 600,
+    sleeper: Callable[[float], None] = time.sleep,
+    payload_extra: dict | None = None,
+    on_start: Callable[[int], None] | None = None,
+) -> dict:
+    """Execute an already-created fire with drift protection, retry, result + delivery."""
     runner = runner or _default_runner
     started = now_iso()
     start_t = time.monotonic()
-    fire_id = f"fire_{uuid.uuid4().hex[:12]}"
 
     rb = runbooks.read_runbook(state.runbook_id)
     if rb is None:
-        return _append_fire(
-            state, fire_id, "failed", started, error=f"runbook {state.runbook_id!r} not found"
+        return _finalize(
+            state, fire_id, "failed", start_t, error=f"runbook {state.runbook_id!r} not found"
         )
 
-    if _has_drifted(rb) and state.drift_policy == "block":
-        record = _append_fire(
-            state,
-            fire_id,
-            "failed",
-            started,
-            error="RUNBOOK_DRIFT: entry changed since registration",
+    if _has_drifted(rb, state.runbook_rev) and state.drift_policy == "block":
+        return _finalize(
+            state, fire_id, "failed", start_t, error="RUNBOOK_DRIFT: entry changed since arm"
         )
-        _maybe_notify(state, "runbook drift blocked")
-        return record
 
-    payload = build_payload(state, value, started, payload_extra)
+    payload = build_payload(state, value, started, fire_id=fire_id, extra=payload_extra)
     attempts = 1 + max(0, state.max_retries)
+    status, res = "failed", None
     with tempfile.TemporaryDirectory() as tmp:
         inv = runbooks.prepare_invocation(rb, payload, Path(tmp))
         cmd = handler_command(rb, inv, max_turns, skip_permissions=state.skip_permissions)
-        status, res = "failed", None
+        env = {**os.environ, **inv.env}
         for attempt in range(attempts):
             try:
-                res = runner(cmd, timeout=timeout, env={**os.environ, **inv.env})
+                res = runner(cmd, timeout=timeout, env=env, on_start=on_start)
             except OSError as err:
-                return _append_fire(state, fire_id, "failed", started, error=str(err))
+                return _finalize(state, fire_id, "failed", start_t, error=str(err))
             status = _attempt_status(rb, res)  # safety-termination shows as nonzero -> failed
             if status == "completed":
                 break
@@ -173,20 +219,67 @@ def fire(
     if status != "completed" and state.max_retries > 0:
         status = "dead_lettered"
     error = None if status == "completed" else _error_text(status, res, timeout)
-    record = _append_fire(
+    result_path = _write_result(fire_id, state, value, res, status, started)
+    return _finalize(
         state,
         fire_id,
         status,
-        started,
-        exit_code=res.returncode,
+        start_t,
+        exit_code=res.returncode if res else None,
         error=error,
-        handler_pid=res.pid,
-        duration_ms=int((time.monotonic() - start_t) * 1000),
-        transcript_tail=(res.stdout or res.stderr or "").strip()[-_TRANSCRIPT_TAIL:],
+        handler_pid=res.pid if res else None,
+        transcript_tail=(res.stdout or res.stderr or "").strip()[-_TRANSCRIPT_TAIL:]
+        if res
+        else None,
+        result_path=result_path,
     )
-    if status == "dead_lettered":
-        _maybe_notify(state, "handler dead-lettered")
-    return record
+
+
+def _finalize(
+    state: WatchState,
+    fire_id: str,
+    status: str,
+    start_t: float,
+    *,
+    exit_code: int | None = None,
+    error: str | None = None,
+    handler_pid: int | None = None,
+    transcript_tail: str | None = None,
+    result_path: str | None = None,
+) -> dict:
+    store.finish_fire(
+        fire_id,
+        status,
+        exit_code=exit_code,
+        error=error,
+        handler_pid=handler_pid,
+        duration_ms=int((time.monotonic() - start_t) * 1000),
+        transcript_tail=transcript_tail,
+        result_path=result_path,
+    )
+    _deliver(state, fire_id, status, error or "ok")
+    return store.read_fire(fire_id)
+
+
+def _write_result(fire_id, state, value, res, status, started) -> str:
+    """Persist the full runbook output as a durable, inspectable result artifact."""
+    path = store.result_path(fire_id)
+    store.write_json_atomic(
+        path,
+        {
+            "fire_id": fire_id,
+            "watch_id": state.watch_id,
+            "runbook_id": state.runbook_id,
+            "status": status,
+            "value": value,
+            "started_at": started,
+            "ended_at": now_iso(),
+            "returncode": res.returncode if res else None,
+            "stdout": (res.stdout or "")[:_RESULT_MAX] if res else "",
+            "stderr": (res.stderr or "")[:_RESULT_MAX] if res else "",
+        },
+    )
+    return str(path)
 
 
 def _attempt_status(rb: runbooks.Runbook, res: HandlerResult) -> str:
@@ -197,28 +290,41 @@ def _attempt_status(rb: runbooks.Runbook, res: HandlerResult) -> str:
     return "failed"
 
 
-def _error_text(status: str, res: HandlerResult, timeout: float) -> str:
+def _error_text(status: str, res: HandlerResult | None, timeout: float) -> str:
     if status == "timed_out":
         return f"handler exceeded {timeout}s timeout"
+    if res is None:
+        return "handler error"
     return (res.stderr or res.stdout or "").strip()[:500]
 
 
-def _has_drifted(rb: runbooks.Runbook) -> bool:
-    """Re-hash the entry (+ scripts/) and compare to the value stored at registration."""
-    if not rb.content_hash:
+def _has_drifted(rb: runbooks.Runbook, expected: str | None) -> bool:
+    """Re-hash the entry (+ scripts/) and compare to the hash pinned at arm time."""
+    expected = expected or rb.content_hash
+    if not expected:
         return False
     current = runbooks.content_hash(store.runbook_dir(rb.id), rb.entry)
-    return current != rb.content_hash
+    return current != expected
 
 
-def _maybe_notify(state: WatchState, summary: str) -> None:
-    """Best-effort: run the configured notify runbook's script for a failure."""
-    if not state.notify_runbook:
+def _deliver(state: WatchState, fire_id: str, status: str, summary: str) -> None:
+    """Run the delivery sink for a subscribed outcome and record a delivery receipt."""
+    if not state.notify_runbook or status not in state.delivery_events:
         return
     rb = runbooks.read_runbook(state.notify_runbook)
     if rb is None:
+        store.set_delivery(fire_id, "failed")
         return
-    payload = json.dumps({"watch_id": state.watch_id, "summary": summary})
+    payload = json.dumps(
+        {
+            "watch_id": state.watch_id,
+            "fire_id": fire_id,
+            "status": status,
+            "label": state.label,
+            "summary": summary,
+            "result_path": str(store.result_path(fire_id)),
+        }
+    )
     try:
         subprocess.run(
             [str(store.runbook_dir(rb.id) / rb.entry)],
@@ -226,8 +332,9 @@ def _maybe_notify(state: WatchState, summary: str) -> None:
             capture_output=True,
             timeout=30,
         )
+        store.set_delivery(fire_id, "delivered")
     except (OSError, subprocess.SubprocessError):
-        pass
+        store.set_delivery(fire_id, "failed")
 
 
 def _result_is_error(stdout: str) -> bool:
@@ -239,34 +346,7 @@ def _result_is_error(stdout: str) -> bool:
 
 
 def record_skipped_overlap(state: WatchState) -> dict:
-    """A crossing arrived while a handler held the in-flight lock (overlap_policy=drop)."""
-    return _append_fire(state, f"fire_{uuid.uuid4().hex[:12]}", "skipped_overlap", now_iso())
-
-
-def _append_fire(
-    state: WatchState,
-    fire_id: str,
-    status: str,
-    started: str,
-    *,
-    exit_code: int | None = None,
-    error: str | None = None,
-    handler_pid: int | None = None,
-    duration_ms: int | None = None,
-    transcript_tail: str | None = None,
-) -> dict:
-    record = {
-        "fire_id": fire_id,
-        "watch_id": state.watch_id,
-        "runbook_id": state.runbook_id,
-        "status": status,
-        "started_at": started,
-        "ended_at": now_iso(),
-        "exit_code": exit_code,
-        "error": error,
-        "handler_pid": handler_pid,
-        "duration_ms": duration_ms,
-        "transcript_tail": transcript_tail,
-    }
-    store.append_jsonl(store.fires_path(state.watch_id), record)
-    return record
+    """A crossing arrived while a fire was still pending/running (overlap_policy=drop)."""
+    fire_id = store.new_fire_id()
+    store.create_fire(fire_id, state.watch_id, "skipped_overlap", runbook_id=state.runbook_id)
+    return store.read_fire(fire_id)

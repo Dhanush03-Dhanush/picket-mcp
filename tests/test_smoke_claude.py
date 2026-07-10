@@ -32,8 +32,12 @@ def test_smoke_trigger_invokes_real_claude(smoke_home, server, prompt_runbook, p
     assert res["ok"]
 
     value["last"] = 4700  # trigger -> the daemon launches a real claude -p handler
-    assert poll_until(lambda: store.read_jsonl(store.fires_path(res["watch_id"])), timeout=120)
 
-    fire = store.read_jsonl(store.fires_path(res["watch_id"]))[-1]
+    def _completed():
+        return any(f["status"] == "completed" for f in store.recent_fires(res["watch_id"]))
+
+    assert poll_until(_completed, timeout=120)
+    fire = store.recent_fires(res["watch_id"])[0]
     assert fire["status"] == "completed"
     assert fire["handler_pid"]  # a real claude process actually ran
+    assert fire["result_path"]  # the full output was persisted as a durable artifact

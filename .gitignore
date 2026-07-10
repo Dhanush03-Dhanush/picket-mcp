@@ -6,9 +6,6 @@ __pycache__/
 dist/
 build/
 
-# uv
-uv.lock
-
 # tooling
 .pytest_cache/
 .ruff_cache/

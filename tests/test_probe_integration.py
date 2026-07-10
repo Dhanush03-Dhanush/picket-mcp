@@ -73,17 +73,12 @@ def test_watchstate_rejects_zero_sources():
 # --- poll_once in probe mode (reuses the edge/gating pipeline) ---------------
 
 
-def test_poll_once_probe_fires_with_payload(home, monkeypatch):
-    captured = {}
-
-    def _capture(st, v, **k):
-        captured.update(v=v, extra=k["payload_extra"])
-
-    monkeypatch.setattr(handler, "fire", _capture)
+def test_poll_once_probe_enqueues_fire_with_payload(home, monkeypatch):
     monkeypatch.setattr(probes, "observe", lambda st: probes.ProbeResult(True, 7, {"sym": "SPX"}))
     st = daemon.poll_once(_probe_state())
     assert st.fire_count == 1 and st.last_value == 7 and st.satisfied is True
-    assert captured == {"v": 7, "extra": {"sym": "SPX"}}  # probe payload reaches the handler
+    fire = store.recent_fires("wch_p")[0]  # probe value + payload persisted on the fire
+    assert fire["value"] == 7 and fire["payload"] == {"sym": "SPX"}
 
 
 def test_poll_once_probe_no_fire(home, monkeypatch):
@@ -105,8 +100,6 @@ def test_poll_once_probe_error_never_fires(home, monkeypatch):
 
 
 def test_poll_once_probe_fires_once_per_episode(home, monkeypatch):
-    fires = []
-    monkeypatch.setattr(handler, "fire", lambda st, v, **k: fires.append(v))
     results = iter(
         [
             probes.ProbeResult(True, 1),
@@ -119,7 +112,11 @@ def test_poll_once_probe_fires_once_per_episode(home, monkeypatch):
     st = _probe_state()
     for _ in range(4):
         daemon.poll_once(st)
-    assert fires == [1, 2] and st.fire_count == 2
+        for f in store.recent_fires("wch_p"):  # a worker completes each fire between episodes
+            if f["status"] == "pending":
+                store.finish_fire(f["fire_id"], "completed")
+    assert [f["value"] for f in reversed(store.recent_fires("wch_p"))] == [1, 2]
+    assert st.fire_count == 2
 
 
 def test_build_payload_probe_mode(home):
