@@ -29,7 +29,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from picket.models import InvalidSpec, WatchState
+from picket.core.models import InvalidSpec, WatchState
 
 SUBDIRS = ("runbooks", "probes", "logs", "results")
 SCHEMA_VERSION = 1

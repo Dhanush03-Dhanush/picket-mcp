@@ -4,8 +4,11 @@ import psutil
 import pytest
 from pydantic import ValidationError
 
-from picket import daemon, handler, probes, runbooks, store, watches
-from picket.models import CadenceSpec, EndpointSpec, PredicateSpec, WatchState
+from picket.conditions import probes
+from picket.core.models import CadenceSpec, EndpointSpec, PredicateSpec, WatchState
+from picket.execution import handler, runbooks
+from picket.persistence import store
+from picket.runtime import daemon, watches
 
 EP = {"url": "https://x/spx"}
 PR = {"path": "$.last", "op": "lt", "value": 4800}

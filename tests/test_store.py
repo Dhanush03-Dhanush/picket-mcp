@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from picket import store
-from picket.models import CadenceSpec, EndpointSpec, PredicateSpec, WatchState
+from picket.core.models import CadenceSpec, EndpointSpec, PredicateSpec, WatchState
+from picket.persistence import store
 
 
 def _sample_state() -> WatchState:

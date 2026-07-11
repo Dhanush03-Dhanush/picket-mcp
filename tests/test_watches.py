@@ -5,8 +5,11 @@ import time
 
 import psutil
 
-from picket import condition, daemon, runbooks, store, watches
-from picket.models import CadenceSpec, EndpointSpec, PredicateSpec, WatchState
+from picket.conditions import condition
+from picket.core.models import CadenceSpec, EndpointSpec, PredicateSpec, WatchState
+from picket.execution import runbooks
+from picket.persistence import store
+from picket.runtime import daemon, watches
 
 EP = {"url": "https://x/spx"}
 PR = {"path": "$.last", "op": "lt", "value": 4800}

@@ -12,7 +12,8 @@ import signal
 import psutil
 import pytest
 
-from picket import store, supervisor, watches
+from picket.persistence import store
+from picket.runtime import supervisor, watches
 
 pytestmark = pytest.mark.stress
 

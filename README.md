@@ -83,8 +83,8 @@ ordinary inspectable files.
 
 | Process | What it is | Role |
 | --- | --- | --- |
-| **Control plane** | the FastMCP stdio server (`picket.server`) | Fast request/response: arm / inspect / pause / stop / audit / reconcile. Never polls, never hosts the wait. May die with the session — nothing is lost; state is durable. |
-| **Runtime** | one detached daemon per active watcher (`python -m picket.daemon <id>`) | double-fork + `setsid`. A **scheduler** thread polls and, on the condition edge, writes a *durable pending fire*; a **worker** thread leases and executes it, so a long handler never blocks polling. Pure Python — no model in the loop. |
+| **Control plane** | the FastMCP stdio server (`picket.mcp.server`) | Fast request/response: arm / inspect / pause / stop / audit / reconcile. Never polls, never hosts the wait. May die with the session — nothing is lost; state is durable. |
+| **Runtime** | one detached daemon per active watcher (`python -m picket.runtime.daemon <id>`) | double-fork + `setsid`. A **scheduler** thread polls and, on the condition edge, writes a *durable pending fire*; a **worker** thread leases and executes it, so a long handler never blocks polling. Pure Python — no model in the loop. |
 | **Handler** | an ephemeral headless `claude -p` (or a script, for `exec` runbooks) | Runs one runbook and exits. The worker supervises it: timeout, retry, dead-letter, result artifact, delivery. |
 | **Supervisor** *(optional)* | `picket-supervisor` reconcile loop | Restarts daemons for watches that should be active but died (crash/reboot), recovers fires abandoned by a crashed worker, prunes old results. Wire it to launchd/systemd — or call the `reconcile` tool on demand. |
 
@@ -534,18 +534,12 @@ Lint/format: `uv run ruff check . && uv run ruff format --check .`
 
 ```
 src/picket/
-  server.py      FastMCP server — thin tool adapters (+ doctor / reconcile)
-  models.py      Pydantic specs + WatchState; strict validation, GET/HEAD, pinned revs
-  store.py       SQLite (WAL): watches, the durable fire ledger, acknowledged commands
-  condition.py   fetch (httpx + auth_ref) · extract (jsonpath) · is_satisfied · baselines
-  runbooks.py    runbook.toml, register/list, content_hash, payload + invocation dispatch
-  probes.py      probe.toml, register/list, run ({fire,value,payload}), drift, dry-run
-  handler.py     durable fire → scoped claude -p / exec → result artifact → delivery
-  daemon.py      detach; scheduler (poll/evaluate/enqueue) + worker (lease/run/deliver)
-  watches.py     arm / list / get / pause / resume / stop / stop_all, verify-before-kill
-  supervisor.py  reconcile: restart dead watches, recover leases, prune results
-  audit.py       get_fire_log / tail_watch_log
-  errors.py      ErrorCode enum + failure envelope
+  core/          shared models, validation, errors, and failure envelopes
+  conditions/    HTTP predicates and registered script probes
+  execution/     runbook registry, handler launch, result capture, and delivery
+  persistence/   SQLite store, file artifacts, and audit queries
+  runtime/       watch lifecycle, detached daemon, worker, and supervisor
+  mcp/           FastMCP transport adapter and tool definitions
 ```
 
 ## Constraints & non-goals

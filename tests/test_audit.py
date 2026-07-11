@@ -1,5 +1,5 @@
-from picket import audit, store
-from picket.models import CadenceSpec, EndpointSpec, PredicateSpec, WatchState
+from picket.core.models import CadenceSpec, EndpointSpec, PredicateSpec, WatchState
+from picket.persistence import audit, store
 
 
 def _watch(watch_id):

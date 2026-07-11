@@ -15,8 +15,8 @@ dependencies = [
 ]
 
 [project.scripts]
-picket = "picket.server:main"
-picket-supervisor = "picket.supervisor:main"
+picket = "picket.mcp.server:main"
+picket-supervisor = "picket.runtime.supervisor:main"
 
 [dependency-groups]
 dev = ["ruff>=0.6", "pytest>=8"]

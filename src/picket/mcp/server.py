@@ -13,9 +13,13 @@ from typing import Literal
 
 from fastmcp import FastMCP
 
-from picket import __version__, audit, condition, probes, runbooks, store, supervisor, watches
-from picket.errors import ErrorCode, failure
-from picket.models import EndpointSpec, InvalidSpec, PredicateSpec, parse
+from picket import __version__
+from picket.conditions import condition, probes
+from picket.core.errors import ErrorCode, failure
+from picket.core.models import EndpointSpec, InvalidSpec, PredicateSpec, parse
+from picket.execution import runbooks
+from picket.persistence import audit, store
+from picket.runtime import supervisor, watches
 
 mcp = FastMCP("picket")
 

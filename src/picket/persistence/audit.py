@@ -7,8 +7,8 @@ second from the daemon's poll/debug log at logs/<id>.log.
 
 from __future__ import annotations
 
-from picket import store
-from picket.errors import ErrorCode, failure
+from picket.core.errors import ErrorCode, failure
+from picket.persistence import store
 
 
 def get_fire_log(watch_id: str | None = None, limit: int = 20) -> dict:

@@ -1,8 +1,8 @@
 import pytest
 from pydantic import ValidationError
 
-from picket.errors import ErrorCode, failure
-from picket.models import CadenceSpec, EndpointSpec, PredicateSpec
+from picket.core.errors import ErrorCode, failure
+from picket.core.models import CadenceSpec, EndpointSpec, PredicateSpec
 
 
 def test_good_specs_validate():

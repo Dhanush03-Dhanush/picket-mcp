@@ -29,9 +29,9 @@ from typing import Any, Literal
 import tomli_w
 from pydantic import BaseModel
 
-from picket import store
-from picket.models import InvalidSpec
-from picket.runbooks import content_hash
+from picket.core.models import InvalidSpec
+from picket.execution.runbooks import content_hash
+from picket.persistence import store
 
 # Run by declared language rather than relying on a shebang + chmod (more robust,
 # and gives Python probes the picket venv's deps such as httpx).

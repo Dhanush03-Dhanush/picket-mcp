@@ -13,7 +13,8 @@ import httpx
 import psutil
 import pytest
 
-from picket import store, watches
+from picket.persistence import store
+from picket.runtime import watches
 
 pytestmark = pytest.mark.smoke
 

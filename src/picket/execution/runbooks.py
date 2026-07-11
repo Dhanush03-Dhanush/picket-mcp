@@ -19,8 +19,8 @@ from typing import Literal
 import tomli_w
 from pydantic import BaseModel, Field
 
-from picket import store
-from picket.models import InvalidSpec
+from picket.core.models import InvalidSpec
+from picket.persistence import store
 
 
 class Runbook(BaseModel):

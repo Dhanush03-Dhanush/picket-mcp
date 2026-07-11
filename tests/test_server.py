@@ -4,7 +4,7 @@ import os
 import psutil
 from fastmcp import Client
 
-from picket.server import mcp
+from picket.mcp.server import mcp
 
 
 def _call(tool: str, **args):
@@ -32,7 +32,7 @@ def test_reconcile_tool_runs(home):
 
 
 def test_test_predicate_tool_runs(monkeypatch):
-    from picket import condition
+    from picket.conditions import condition
 
     monkeypatch.setattr(condition, "fetch", lambda ep, **k: {"last": 4700})
     result = _call(
@@ -58,7 +58,9 @@ def test_test_predicate_tool_rejects_bad_spec():
 
 def test_v0_walking_skeleton_end_to_end(home, monkeypatch):
     """register -> arm -> list -> get -> stop, end to end across the MCP tools."""
-    from picket import condition, daemon, store
+    from picket.conditions import condition
+    from picket.persistence import store
+    from picket.runtime import daemon
 
     d = home / "runbooks" / "notify"
     d.mkdir(parents=True)

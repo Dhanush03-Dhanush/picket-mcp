@@ -15,17 +15,25 @@ import httpx
 from jsonpath_ng import parse as jsonpath_parse
 from jsonpath_ng.exceptions import JSONPathError
 
-from picket.models import EndpointSpec, PredicateSpec
+from picket.core.models import EndpointSpec, PredicateSpec
 
 
 class ObserveError(Exception):
     """Could not observe the value (fetch/extract/type failure). Never fires."""
 
 
+_MAX_RESPONSE_BYTES = 5_000_000  # bound a poll's response so a huge body can't OOM the daemon
+
+
 def fetch(
     endpoint: EndpointSpec, *, client: httpx.Client | None = None, timeout: float = 10.0
 ) -> Any:
-    """GET/POST the endpoint and parse JSON. ``auth_ref`` is read from env here."""
+    """Fetch the endpoint and parse JSON, reading at most ``_MAX_RESPONSE_BYTES``.
+
+    ``auth_ref`` is read from env here. The body is streamed with a hard byte cap
+    so a hostile or accidentally-huge response cannot exhaust the daemon's memory
+    on every poll — over the cap is an observe error (never a fire).
+    """
     headers = dict(endpoint.headers)
     if endpoint.auth_ref:
         token = os.environ.get(endpoint.auth_ref)
@@ -36,10 +44,17 @@ def fetch(
     owned = client is None
     client = client or httpx.Client(timeout=timeout)
     try:
-        resp = client.request(endpoint.method, endpoint.url, headers=headers, json=endpoint.body)
-        resp.raise_for_status()
-        return resp.json()
-    except (httpx.HTTPError, json.JSONDecodeError) as err:
+        with client.stream(
+            endpoint.method, endpoint.url, headers=headers, json=endpoint.body
+        ) as resp:
+            resp.raise_for_status()
+            body = bytearray()
+            for chunk in resp.iter_bytes():
+                body += chunk
+                if len(body) > _MAX_RESPONSE_BYTES:
+                    raise ObserveError(f"response exceeded {_MAX_RESPONSE_BYTES} bytes")
+            return json.loads(body)
+    except (httpx.HTTPError, json.JSONDecodeError, UnicodeDecodeError) as err:
         raise ObserveError(f"fetch failed: {err}") from err
     finally:
         if owned:

@@ -7,7 +7,10 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
-from picket import probes, runbooks, store, watches
+from picket.conditions import probes
+from picket.execution import runbooks
+from picket.persistence import store
+from picket.runtime import watches
 
 
 @pytest.fixture

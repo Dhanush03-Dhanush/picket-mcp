@@ -14,8 +14,9 @@ from __future__ import annotations
 import sys
 import time
 
-from picket import store, watches
-from picket.daemon import spawn
+from picket.persistence import store
+from picket.runtime import watches
+from picket.runtime.daemon import spawn
 
 
 def reconcile(*, result_retention: int = 500) -> dict:

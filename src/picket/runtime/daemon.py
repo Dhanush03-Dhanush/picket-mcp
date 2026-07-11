@@ -1,6 +1,6 @@
 """The runtime: one detached daemon per active watcher, split into two roles.
 
-Run as ``python -m picket.daemon <watch_id>``. It double-forks + setsid so
+Run as ``python -m picket.runtime.daemon <watch_id>``. It double-forks + setsid so
 closing the arming session doesn't SIGHUP it, then runs two cooperating parts:
 
 * the **scheduler** (main thread) polls on the cadence, evaluates the condition,
@@ -30,10 +30,12 @@ from zoneinfo import ZoneInfo
 
 import psutil
 
-from picket import condition, handler, probes, store
-from picket.condition import ObserveError
-from picket.models import CadenceSpec, WatchState
-from picket.store import now_iso
+from picket.conditions import condition, probes
+from picket.conditions.condition import ObserveError
+from picket.core.models import CadenceSpec, WatchState
+from picket.execution import handler
+from picket.persistence import store
+from picket.persistence.store import now_iso
 
 
 def _parse(ts: str) -> datetime:
@@ -143,38 +145,45 @@ class Worker(threading.Thread):
 
     def run(self) -> None:
         while not self._cancel.is_set():
-            state = store.read_watch(self.watch_id)
-            if state is None:
-                return
-            claimed = store.claim_next_fire(
-                self.watch_id, os.getpid(), state.handler_timeout_seconds + 60
-            )
-            if claimed is None:
-                if self._drain.is_set():
-                    return  # graceful drain: nothing left to run
-                self._cancel.wait(self._poll)
-                continue
-            self._execute(state, claimed)
+            try:
+                state = store.read_watch(self.watch_id)
+                if state is None:
+                    return
+                claimed = store.claim_next_fire(
+                    self.watch_id, os.getpid(), state.handler_timeout_seconds + 60
+                )
+                if claimed is None:
+                    if self._drain.is_set():
+                        return  # graceful drain: nothing left to run
+                    self._cancel.wait(self._poll)
+                    continue
+                self._execute(state, claimed)
+            except Exception:  # a worker must never die and silently strand the watch's queue
+                self._cancel.wait(self._poll)  # transient (e.g. DB lock): back off, keep draining
 
     def _execute(self, state: WatchState, claimed: dict) -> None:
         fire_id = claimed["fire_id"]
         if self._cancel.is_set():
             store.finish_fire(fire_id, "failed", error="cancelled before start")
             return
-        value = json.loads(claimed["value"]) if claimed["value"] else None
-        extra = json.loads(claimed["payload"]) if claimed["payload"] else None
 
         def on_start(pid: int) -> None:
             with self._lock:
                 self._current_pid = pid
             store.set_running_pid(fire_id, pid)
 
-        handler.run_fire(
-            state, value, fire_id,
-            timeout=state.handler_timeout_seconds, payload_extra=extra, on_start=on_start,
-        )  # fmt: skip
-        with self._lock:
-            self._current_pid = None
+        try:
+            value = json.loads(claimed["value"]) if claimed["value"] else None
+            extra = json.loads(claimed["payload"]) if claimed["payload"] else None
+            handler.run_fire(
+                state, value, fire_id,
+                timeout=state.handler_timeout_seconds, payload_extra=extra, on_start=on_start,
+            )  # fmt: skip
+        except Exception as err:  # finalize so a handler bug never strands the fire as 'running'
+            store.finish_fire(fire_id, "failed", error=f"worker error: {err}"[:500])
+        finally:
+            with self._lock:
+                self._current_pid = None
 
     def drain(self) -> None:
         """Finish any pending fires, then exit (graceful stop)."""
@@ -190,6 +199,14 @@ class Worker(threading.Thread):
 
 def _log(state: WatchState, message: str) -> None:
     store.append_log(store.log_path(state.watch_id), f"{now_iso()} {message}")
+
+
+def _safe_log(watch_id: str, message: str) -> None:
+    """Log without ever raising — used on the error path of the poll loop."""
+    try:
+        store.append_log(store.log_path(watch_id), f"{now_iso()} {message}")
+    except Exception:
+        pass
 
 
 def _record_identity(state: WatchState) -> None:
@@ -223,33 +240,39 @@ def run(
     n = 0
     try:
         while iterations is None or n < iterations:
-            cmd = store.poll_command(watch_id)
-            if cmd:
-                cmd_id, name = cmd
-                if name == "stop":
-                    state.status = "stopping"
-                    store.write_watch(state)
-                    store.ack_command(watch_id, cmd_id)
+            try:
+                cmd = store.poll_command(watch_id)
+                if cmd:
+                    cmd_id, name = cmd
+                    if name == "stop":
+                        state.status = "stopping"
+                        store.write_watch(state)
+                        store.ack_command(watch_id, cmd_id)
+                        stopped = True
+                        break
+                    if name in ("pause", "resume"):
+                        state.status = "paused" if name == "pause" else "active"
+                        state.desired_status = state.status
+                        store.write_watch(state)
+                        store.ack_command(watch_id, cmd_id)
+
+                if _ttl_expired(state):
                     stopped = True
                     break
-                if name in ("pause", "resume"):
-                    state.status = "paused" if name == "pause" else "active"
-                    state.desired_status = state.status
+
+                if state.status == "paused" or not in_active_window(state.cadence):
+                    state.heartbeat_at = now_iso()  # stay alive, do not poll
                     store.write_watch(state)
-                    store.ack_command(watch_id, cmd_id)
-
-            if _ttl_expired(state):
-                stopped = True
-                break
-
-            if state.status == "paused" or not in_active_window(state.cadence):
-                state.heartbeat_at = now_iso()  # stay alive, do not poll
-                store.write_watch(state)
-            else:
-                poll_once(state)
-                if state.max_fires is not None and store.count_fires(watch_id) >= state.max_fires:
-                    stopped = True
-                    break
+                else:
+                    poll_once(state)
+                    if (
+                        state.max_fires is not None
+                        and store.count_fires(watch_id) >= state.max_fires
+                    ):
+                        stopped = True
+                        break
+            except Exception as err:  # transient store/DB error: skip this tick, stay alive
+                _safe_log(watch_id, f"loop-error: {err}")
 
             n += 1
             if iterations is None or n < iterations:
@@ -299,7 +322,7 @@ def spawn(watch_id: str) -> None:
     import subprocess
 
     subprocess.Popen(
-        [sys.executable, "-m", "picket.daemon", watch_id],
+        [sys.executable, "-m", "picket.runtime.daemon", watch_id],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,

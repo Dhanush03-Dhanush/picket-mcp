@@ -8,8 +8,8 @@ import psutil
 import pytest
 from pydantic import ValidationError
 
-from picket import condition, daemon, handler, probes, runbooks, store, watches
-from picket.models import (
+from picket.conditions import condition, probes
+from picket.core.models import (
     ActiveWindow,
     CadenceSpec,
     EndpointSpec,
@@ -17,6 +17,9 @@ from picket.models import (
     PredicateSpec,
     WatchState,
 )
+from picket.execution import handler, runbooks
+from picket.persistence import store
+from picket.runtime import daemon, watches
 
 EP = {"url": "https://x/spx"}
 PR = {"path": "$.last", "op": "lt", "value": 4800}
@@ -278,3 +281,65 @@ def test_active_handler_pid_tracked_for_cancellation(home):
     store.create_fire("f1", "w", "running")
     store.set_running_pid("f1", psutil.Process().pid)
     assert store.active_handler_pid("w") == psutil.Process().pid
+
+
+# --- runtime resilience: a bad fire or transient DB error must not strand a watch ---
+
+
+class _FakeWorker:
+    def __init__(self, *a, **k):
+        pass
+
+    def start(self):
+        pass
+
+    def drain(self):
+        pass
+
+    def cancel(self):
+        pass
+
+    def join(self, timeout=None):
+        pass
+
+
+def test_worker_finalizes_fire_when_handler_raises(home, monkeypatch):
+    """A crash inside run_fire must finalize the fire as failed, not strand it 'running'."""
+    st = _watchstate(watch_id="wch_1", runbook_id="rb")
+    store.write_watch(st)
+    store.create_fire("f1", "wch_1", "pending")
+    claimed = store.claim_next_fire("wch_1", worker_pid=999, lease_seconds=60)  # -> running
+
+    def boom(*a, **k):
+        raise RuntimeError("handler blew up")
+
+    monkeypatch.setattr(handler, "run_fire", boom)
+    daemon.Worker("wch_1")._execute(st, claimed)  # must NOT propagate
+
+    fire = store.read_fire("f1")
+    assert fire["status"] == "failed" and "worker error" in fire["error"]
+
+
+def test_daemon_loop_survives_transient_poll_error(home, monkeypatch):
+    """A transient store/DB error in a poll must skip the tick, not kill the daemon."""
+    st = _watchstate(watch_id="wch_1", runbook_id="rb", baseline=4900, max_fires=None)
+    store.write_watch(st)
+    calls = {"n": 0}
+
+    def flaky(_state):
+        calls["n"] += 1
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(daemon, "poll_once", flaky)
+    daemon.run("wch_1", iterations=3, sleeper=lambda s: None, worker=_FakeWorker())  # no raise
+    assert calls["n"] == 3  # kept polling across every error
+
+
+def test_fetch_caps_oversize_response():
+    """A response past the byte cap is an observe error, never an OOM."""
+    import httpx
+
+    big = b'{"x":"' + b"a" * 6_000_000 + b'"}'  # > 5 MB cap
+    client = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, content=big)))
+    with pytest.raises(condition.ObserveError):
+        condition.fetch(EndpointSpec(url="https://x"), client=client)
