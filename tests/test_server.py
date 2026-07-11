@@ -4,7 +4,7 @@ import os
 import psutil
 from fastmcp import Client
 
-from picket.mcp.server import mcp
+from picket.server import mcp
 
 
 def _call(tool: str, **args):
