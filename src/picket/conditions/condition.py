@@ -15,17 +15,25 @@ import httpx
 from jsonpath_ng import parse as jsonpath_parse
 from jsonpath_ng.exceptions import JSONPathError
 
-from picket.models import EndpointSpec, PredicateSpec
+from picket.core.models import EndpointSpec, PredicateSpec
 
 
 class ObserveError(Exception):
     """Could not observe the value (fetch/extract/type failure). Never fires."""
 
 
+_MAX_RESPONSE_BYTES = 5_000_000  # bound a poll's response so a huge body can't OOM the daemon
+
+
 def fetch(
     endpoint: EndpointSpec, *, client: httpx.Client | None = None, timeout: float = 10.0
 ) -> Any:
-    """GET/POST the endpoint and parse JSON. ``auth_ref`` is read from env here."""
+    """Fetch the endpoint and parse JSON, reading at most ``_MAX_RESPONSE_BYTES``.
+
+    ``auth_ref`` is read from env here. The body is streamed with a hard byte cap
+    so a hostile or accidentally-huge response cannot exhaust the daemon's memory
+    on every poll — over the cap is an observe error (never a fire).
+    """
     headers = dict(endpoint.headers)
     if endpoint.auth_ref:
         token = os.environ.get(endpoint.auth_ref)
@@ -36,10 +44,17 @@ def fetch(
     owned = client is None
     client = client or httpx.Client(timeout=timeout)
     try:
-        resp = client.request(endpoint.method, endpoint.url, headers=headers, json=endpoint.body)
-        resp.raise_for_status()
-        return resp.json()
-    except (httpx.HTTPError, json.JSONDecodeError) as err:
+        with client.stream(
+            endpoint.method, endpoint.url, headers=headers, json=endpoint.body
+        ) as resp:
+            resp.raise_for_status()
+            body = bytearray()
+            for chunk in resp.iter_bytes():
+                body += chunk
+                if len(body) > _MAX_RESPONSE_BYTES:
+                    raise ObserveError(f"response exceeded {_MAX_RESPONSE_BYTES} bytes")
+            return json.loads(body)
+    except (httpx.HTTPError, json.JSONDecodeError, UnicodeDecodeError) as err:
         raise ObserveError(f"fetch failed: {err}") from err
     finally:
         if owned:
@@ -84,10 +99,13 @@ def is_satisfied(predicate: PredicateSpec, value: Any, baseline: Any = None) -> 
         return baseline is not None and value != baseline
 
     if predicate.op == "pct_change":
-        if not baseline:  # None or 0: nothing to measure against
+        # Coerce a numeric-string baseline (common in financial APIs) so a
+        # "prior_close" of "4900" measures correctly instead of crashing the daemon.
+        base = _as_target_type(baseline, 0.0) if baseline is not None else 0.0
+        if not base:  # None, 0, or "0": nothing to measure against
             return False
-        pct = (_as_target_type(value, 0.0) - baseline) / baseline * 100
-        threshold = predicate.value
+        pct = (_as_target_type(value, 0.0) - base) / base * 100
+        threshold = float(predicate.value)
         return pct <= threshold if threshold < 0 else pct >= threshold
 
     target = predicate.value
@@ -136,8 +154,11 @@ def run_test_predicate(endpoint: EndpointSpec, predicate: PredicateSpec) -> dict
     except ObserveError as err:
         return _result(would_fire=False, response_excerpt=excerpt, extract_error=str(err))
 
+    # Evaluate against the baseline arm would capture, so a dry run of a stateful
+    # op (pct_change / on_change) reflects the real first-poll decision.
     try:
-        satisfied = is_satisfied(predicate, value, baseline=None)
+        baseline = initial_baseline(predicate, value, data)
+        satisfied = is_satisfied(predicate, value, baseline=baseline)
     except ObserveError as err:
         return _result(
             would_fire=False,
@@ -146,14 +167,19 @@ def run_test_predicate(endpoint: EndpointSpec, predicate: PredicateSpec) -> dict
             extract_error=str(err),
         )
 
-    return _result(would_fire=satisfied, response_excerpt=excerpt, extracted_value=value)
+    return _result(
+        would_fire=satisfied, response_excerpt=excerpt, extracted_value=value, baseline=baseline
+    )
 
 
-def _result(*, would_fire, response_excerpt=None, extracted_value=None, extract_error=None) -> dict:
+def _result(
+    *, would_fire, response_excerpt=None, extracted_value=None, extract_error=None, baseline=None
+) -> dict:
     return {
         "ok": True,
         "would_fire": would_fire,
         "extracted_value": extracted_value,
+        "baseline": baseline,
         "response_excerpt": response_excerpt,
         "extract_error": extract_error,
     }

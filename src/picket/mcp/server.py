@@ -7,13 +7,19 @@ the logic they call is unit-tested directly.
 
 from __future__ import annotations
 
+import os
+import shutil
 from typing import Literal
 
 from fastmcp import FastMCP
 
-from picket import __version__, audit, condition, probes, runbooks, watches
-from picket.errors import ErrorCode, failure
-from picket.models import EndpointSpec, InvalidSpec, PredicateSpec, parse
+from picket import __version__
+from picket.conditions import condition, probes
+from picket.core.errors import ErrorCode, failure
+from picket.core.models import EndpointSpec, InvalidSpec, PredicateSpec, parse
+from picket.execution import runbooks
+from picket.persistence import audit, store
+from picket.runtime import supervisor, watches
 
 mcp = FastMCP("picket")
 
@@ -22,6 +28,28 @@ mcp = FastMCP("picket")
 def ping() -> dict:
     """Health check: confirm the Picket control plane is reachable."""
     return {"ok": True, "service": "picket", "version": __version__}
+
+
+@mcp.tool
+def doctor() -> dict:
+    """Preflight: is Picket ready to arm? Checks claude, the root, the DB, and counts.
+
+    Run this first — it is the fast way to confirm the `claude` CLI is on PATH and
+    the on-disk root is writable before you register runbooks and arm a watch.
+    """
+    home = store.ensure_root()
+    claude = shutil.which("claude")
+    checks = {
+        "claude_on_path": bool(claude),
+        "claude_path": claude,
+        "picket_home": str(home),
+        "home_writable": os.access(home, os.W_OK),
+        "db": str(store.db_path()),
+        "watches": len(store.all_watch_ids()),
+        "runbooks": len(runbooks.list_runbooks()),
+        "probes": len(probes.list_probes()),
+    }
+    return {"ok": bool(checks["home_writable"]), **checks}
 
 
 @mcp.tool
@@ -135,22 +163,29 @@ def arm_watch(
     probe_params: dict | None = None,
     label: str | None = None,
     max_fires: int | None = None,
+    recurring: bool = False,
     ttl_seconds: float | None = None,
     debounce_seconds: float = 0,
     cooldown_seconds: float = 0,
     max_retries: int = 0,
     drift_policy: str = "block",
     notify_runbook: str | None = None,
+    delivery_events: list[str] | None = None,
     skip_permissions: bool = False,
     confirm_skip: bool = False,
 ) -> dict:
     """Arm a watcher and spawn its detached daemon, then return immediately.
 
-    Provide exactly one condition source: an endpoint+predicate (§8 spec dicts) OR
-    a probe_id (a registered probe script, with optional probe_params). runbook_id
-    must already be registered. skip_permissions=true requires confirm_skip=true
-    (high-stakes bypass; see SECURITY in the README). Returns watch_id, status,
-    pid, pgid, baseline, trial_value.
+    Provide exactly one condition source: an endpoint+predicate (endpoint is
+    polled GET/HEAD only) OR a probe_id (a registered probe script, with optional
+    probe_params). runbook_id must already be registered; its content revision is
+    pinned so a later re-registration can't retarget this watch.
+
+    One-shot is the default (max_fires=1). Pass recurring=true for an unbounded
+    watcher, or an explicit max_fires. notify_runbook is the delivery sink; it
+    fires for every outcome in delivery_events (default: all terminal outcomes,
+    success included). skip_permissions=true requires confirm_skip=true. Returns
+    watch_id, status, pid, pgid, baseline, trial_value, max_fires.
     """
     return watches.arm_watch(
         runbook_id=runbook_id,
@@ -161,15 +196,27 @@ def arm_watch(
         probe_params=probe_params,
         label=label,
         max_fires=max_fires,
+        recurring=recurring,
         ttl_seconds=ttl_seconds,
         debounce_seconds=debounce_seconds,
         cooldown_seconds=cooldown_seconds,
         max_retries=max_retries,
         drift_policy=drift_policy,
         notify_runbook=notify_runbook,
+        delivery_events=delivery_events,
         skip_permissions=skip_permissions,
         confirm_skip=confirm_skip,
     )
+
+
+@mcp.tool
+def reconcile() -> dict:
+    """Restore any dead 'active' watches, recover crash-abandoned fires, prune old results.
+
+    The on-demand form of the optional supervisor loop — call it after a reboot or
+    if `list_watches` shows an `errored` watch. Returns restarted/recovered/pruned.
+    """
+    return supervisor.reconcile()
 
 
 @mcp.tool

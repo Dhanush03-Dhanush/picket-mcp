@@ -1,5 +1,6 @@
-from picket import handler, runbooks, store
-from picket.models import CadenceSpec, EndpointSpec, PredicateSpec, WatchState
+from picket.core.models import CadenceSpec, EndpointSpec, PredicateSpec, WatchState
+from picket.execution import handler, runbooks
+from picket.persistence import store
 
 
 def _state(runbook_id="rb", **kw):
@@ -46,7 +47,7 @@ def test_exec_runbook_runs_directly_and_records_completed(home):
     rec = handler.fire(_state(), 4700)
     assert rec["status"] == "completed"
     assert rec["exit_code"] == 0
-    assert len(store.read_jsonl(store.fires_path("wch_1"))) == 1
+    assert len(store.recent_fires("wch_1")) == 1
 
 
 def test_exec_runbook_nonzero_exit_records_failed(home):
@@ -110,7 +111,7 @@ def test_missing_runbook_records_failed_fire(home):
     rec = handler.fire(_state(runbook_id="ghost"), 4700)
     assert rec["status"] == "failed"
     assert "not found" in rec["error"]
-    assert store.read_jsonl(store.fires_path("wch_1"))[0]["status"] == "failed"
+    assert store.recent_fires("wch_1")[0]["status"] == "failed"
 
 
 # --- NEW-12: retry / dead-letter / drift / notify --------------------------

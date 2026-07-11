@@ -1,25 +1,28 @@
-"""Watch lifecycle (§10/§11/§12.1-12.4): arm, list, inspect, stop.
+"""Watch lifecycle: arm, list, inspect, control, stop.
 
-The v0 control surface that ties the pieces together. arm_watch validates, does
-one trial fetch+extract (to capture the baseline), persists the baseline + state,
-spawns the detached daemon, and reads back the identity the daemon records.
-Liveness and stop use verify-before-kill (pid present AND psutil create_time
-matches) to guard against PID reuse.
+arm_watch validates, does one trial fetch/probe (capturing the baseline), pins
+the runbook/probe **content revision** so a later re-registration can't silently
+retarget the watch, persists the durable state, spawns the detached daemon, and
+reads back its identity. One-shot is the default; recurrence is an explicit
+``recurring=true`` opt-in. Liveness and stop use verify-before-kill (pid present
+AND psutil create_time matches) to guard against PID reuse; an immediate stop
+also cancels the in-flight handler so it can't outlive the reported terminal.
 """
 
 from __future__ import annotations
 
 import os
 import signal
-import time
 from datetime import UTC, datetime
 
 import psutil
+from pydantic import ValidationError
 
-from picket import condition, daemon, probes, runbooks, store
-from picket.condition import ObserveError
-from picket.errors import ErrorCode, failure
-from picket.models import (
+from picket.conditions import condition, probes
+from picket.conditions.condition import ObserveError
+from picket.core.errors import ErrorCode, failure
+from picket.core.models import (
+    DELIVERY_EVENTS,
     CadenceSpec,
     EndpointSpec,
     InvalidSpec,
@@ -27,7 +30,10 @@ from picket.models import (
     WatchState,
     parse,
 )
-from picket.store import now_iso
+from picket.execution import runbooks
+from picket.persistence import store
+from picket.persistence.store import now_iso
+from picket.runtime import daemon
 
 
 def is_alive(state: WatchState) -> bool:
@@ -54,7 +60,7 @@ def _heartbeat_stale(state: WatchState) -> bool:
 
 
 def effective_status(state: WatchState) -> str:
-    """Report 'errored' for an active watch whose daemon died or went stale (§12 crash recovery)."""
+    """Report 'errored' for an active watch whose daemon died or went stale."""
     if state.status == "active" and (not is_alive(state) or _heartbeat_stale(state)):
         return "errored"
     return state.status
@@ -63,7 +69,9 @@ def effective_status(state: WatchState) -> str:
 def _await_identity(
     watch_id: str, timeout: float = 5.0, interval: float = 0.05
 ) -> WatchState | None:
-    """Wait for the daemon to record its pid in the state file (the spawn handshake)."""
+    """Wait for the daemon to record its pid in the state row (the spawn handshake)."""
+    import time
+
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         state = store.read_watch(watch_id)
@@ -83,16 +91,19 @@ def arm_watch(
     probe_params: dict | None = None,
     label: str | None = None,
     max_fires: int | None = None,
+    recurring: bool = False,
     ttl_seconds: float | None = None,
     debounce_seconds: float = 0,
     cooldown_seconds: float = 0,
     max_retries: int = 0,
     drift_policy: str = "block",
     notify_runbook: str | None = None,
+    delivery_events: list[str] | None = None,
     skip_permissions: bool = False,
     confirm_skip: bool = False,
 ) -> dict:
-    """Validate, trial-observe, persist, and spawn a detached daemon for one watch."""
+    """Validate, trial-observe, pin the revision, persist, and spawn a daemon."""
+    store.ensure_root()
     try:
         cad = parse(CadenceSpec, cadence)
         ep = parse(EndpointSpec, endpoint) if endpoint else None
@@ -111,13 +122,16 @@ def arm_watch(
             ErrorCode.PERMISSION_REQUIRED, "skip_permissions=true requires confirm_skip=true"
         )
 
-    if runbooks.read_runbook(runbook_id) is None:
+    rb = runbooks.read_runbook(runbook_id)
+    if rb is None:
         return failure(ErrorCode.RUNBOOK_NOT_FOUND, f"runbook {runbook_id!r} is not registered")
 
+    probe_rev = None
     if use_probe:
         probe = probes.read_probe(probe_id)
         if probe is None:
             return failure(ErrorCode.PROBE_NOT_FOUND, f"probe {probe_id!r} is not registered")
+        probe_rev = probe.content_hash
         try:
             trial_value = probes.run_probe(probe, probe_params or {}).value
         except probes.ProbeError as err:
@@ -131,19 +145,24 @@ def arm_watch(
         except ObserveError as err:
             return failure(ErrorCode.ENDPOINT_UNREACHABLE, str(err))
 
+    if max_fires is None:  # safe default: one-shot; recurrence is an explicit opt-in
+        max_fires = None if recurring else 1
+
     watch_id = store.new_watch_id()
-    store.ensure_root()
-    store.write_watch(
-        WatchState(
+    try:
+        state = WatchState(
             watch_id=watch_id,
             runbook_id=runbook_id,
+            runbook_rev=rb.content_hash,
             endpoint=ep,
             predicate=pr,
             probe_id=probe_id,
+            probe_rev=probe_rev,
             probe_params=probe_params or {},
             cadence=cad,
             label=label,
             status="active",
+            desired_status="active",
             baseline=baseline,
             created_at=now_iso(),
             max_fires=max_fires,
@@ -153,9 +172,12 @@ def arm_watch(
             max_retries=max_retries,
             drift_policy=drift_policy,
             notify_runbook=notify_runbook,
-            skip_permissions=skip_permissions,  # opt-in recorded on the state file
+            delivery_events=delivery_events or list(DELIVERY_EVENTS),
+            skip_permissions=skip_permissions,
         )
-    )
+    except ValidationError as err:
+        return failure(ErrorCode.INVALID_SPEC, str(err))
+    store.write_watch(state)
 
     try:
         daemon.spawn(watch_id)
@@ -173,14 +195,15 @@ def arm_watch(
         "pgid": live.pgid,
         "baseline": baseline,
         "trial_value": trial_value,
+        "max_fires": max_fires,
     }
 
 
 def list_watches(status_filter: str = "all") -> dict:
     """List watches with per-row liveness verification."""
     rows = []
-    for path in sorted((store.picket_home() / "watches").glob("*.json")):
-        state = store.read_watch(path.stem)
+    for watch_id in store.all_watch_ids():
+        state = store.read_watch(watch_id)
         if state is None:
             continue
         status = effective_status(state)
@@ -194,6 +217,7 @@ def list_watches(status_filter: str = "all") -> dict:
                 "runbook_id": state.runbook_id,
                 "source": f"probe:{state.probe_id}" if state.probe_id else "endpoint",
                 "cadence_summary": f"every {state.cadence.interval_seconds:g}s",
+                "mode": "recurring" if state.max_fires is None else f"max_fires={state.max_fires}",
                 "fire_count": state.fire_count,
                 "last_observed_at": state.last_observed_at,
                 "last_error": state.last_error,
@@ -208,7 +232,6 @@ def get_watch(watch_id: str, log_lines: int = 20) -> dict:
     state = store.read_watch(watch_id)
     if state is None:
         return failure(ErrorCode.NOT_FOUND, f"no watch {watch_id!r}")
-    fires = store.read_jsonl(store.fires_path(watch_id))
     log = store.log_path(watch_id)
     tail = log.read_text().splitlines()[-log_lines:] if log.exists() else []
     return {
@@ -216,7 +239,7 @@ def get_watch(watch_id: str, log_lines: int = 20) -> dict:
         "watch": state.model_dump(),
         "alive": is_alive(state),
         "effective_status": effective_status(state),
-        "most_recent_fire": fires[-1] if fires else None,
+        "most_recent_fire": store.most_recent_fire(watch_id),
         "log_tail": tail,
     }
 
@@ -237,15 +260,24 @@ def _send_control(watch_id: str, command: str) -> dict:
         return failure(ErrorCode.NOT_FOUND, f"no watch {watch_id!r}")
     if state.status == "stopped":
         return failure(ErrorCode.ALREADY_STOPPED, f"{watch_id!r} is stopped")
-    store.write_control(watch_id, command)
+    store.enqueue_command(watch_id, command)
     return {"ok": True, "watch_id": watch_id, "requested": command}
+
+
+def _killpg(pgid: int, sig: int) -> None:
+    try:
+        os.killpg(pgid, sig)
+    except (ProcessLookupError, OSError):
+        pass
 
 
 def stop_watch(watch_id: str, mode: str = "graceful") -> dict:
     """Verify-before-kill stop. Idempotent: a second call returns ALREADY_STOPPED.
 
-    The server records the terminal status (a documented exception to daemon
-    ownership — a stopped/killed daemon cannot write its own final status).
+    ``graceful`` asks the daemon to drain the in-flight handler, then exit.
+    ``immediate`` cancels the in-flight handler's process group and the daemon's,
+    so no side effect outlives the reported terminal status. The server records
+    the terminal status (the daemon may be killed before it can write its own).
     """
     state = store.read_watch(watch_id)
     if state is None:
@@ -253,17 +285,18 @@ def stop_watch(watch_id: str, mode: str = "graceful") -> dict:
     if state.status == "stopped":
         return failure(ErrorCode.ALREADY_STOPPED, f"{watch_id!r} already stopped")
 
-    in_flight = store.lock_path(watch_id).exists()
+    in_flight = store.has_active_fire(watch_id)
     if is_alive(state):
         if mode == "immediate":
-            try:
-                os.killpg(state.pgid, signal.SIGTERM)
-            except (ProcessLookupError, OSError):
-                pass
-        else:  # graceful: let the daemon stop after its current loop/handler
-            store.write_control(watch_id, "stop")
+            hpid = store.active_handler_pid(watch_id)
+            if hpid:
+                _killpg(hpid, signal.SIGKILL)  # cancel the running handler first
+            _killpg(state.pgid, signal.SIGTERM)
+        else:  # graceful: the daemon drains the current handler, then exits
+            store.enqueue_command(watch_id, "stop")
 
     state.status = "stopped"
+    state.desired_status = "stopped"
     store.write_watch(state)
     return {"ok": True, "final_status": "stopped", "handler_was_in_flight": in_flight}
 
@@ -275,8 +308,8 @@ def stop_all_watches(
     if not confirm:
         return failure(ErrorCode.PERMISSION_REQUIRED, "stop_all_watches requires confirm=true")
     stopped, failures = [], []
-    for path in sorted((store.picket_home() / "watches").glob("*.json")):
-        state = store.read_watch(path.stem)
+    for watch_id in store.all_watch_ids():
+        state = store.read_watch(watch_id)
         if state is None or (status_filter != "all" and state.status != status_filter):
             continue
         result = stop_watch(state.watch_id, mode)

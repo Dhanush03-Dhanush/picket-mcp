@@ -13,12 +13,18 @@ import httpx
 import psutil
 import pytest
 
-from picket import store, watches
+from picket.persistence import store
+from picket.runtime import watches
 
 pytestmark = pytest.mark.smoke
 
 # A real, no-auth public API for the monitoring example (mirrors the SPX use case).
 PUBLIC_API = "https://api.coinbase.com/v2/prices/BTC-USD/spot"
+
+
+def _completed(watch_id):
+    """A real fire reached the durable ledger and finished successfully."""
+    return any(f["status"] == "completed" for f in store.recent_fires(watch_id))
 
 
 def test_smoke_arm_fires_real_exec_handler_then_self_stops(
@@ -38,8 +44,8 @@ def test_smoke_arm_fires_real_exec_handler_then_self_stops(
     assert res["ok"] and psutil.pid_exists(res["pid"])
 
     value["last"] = 4700  # the real daemon observes this on its next poll and fires
-    assert poll_until(lambda: store.read_jsonl(store.fires_path(res["watch_id"])))
-    assert store.read_jsonl(store.fires_path(res["watch_id"]))[-1]["status"] == "completed"
+    assert poll_until(lambda: _completed(res["watch_id"]))
+    assert store.recent_fires(res["watch_id"])[0]["status"] == "completed"
     assert marker.exists() and res["watch_id"] in marker.read_text()
     assert poll_until(lambda: store.read_watch(res["watch_id"]).status == "stopped")  # max_fires=1
 
@@ -94,8 +100,8 @@ def test_smoke_conditional_daemon_fires_once(
     assert res["ok"]
     value["last"] = trigger  # the real daemon observes the crossing and fires
 
-    assert poll_until(lambda: store.read_jsonl(store.fires_path(res["watch_id"])))
-    assert store.read_jsonl(store.fires_path(res["watch_id"]))[-1]["status"] == "completed"
+    assert poll_until(lambda: _completed(res["watch_id"]))
+    assert store.recent_fires(res["watch_id"])[0]["status"] == "completed"
     assert poll_until(lambda: store.read_watch(res["watch_id"]).status == "stopped")
 
 
@@ -125,8 +131,8 @@ def test_smoke_probe_daemon_fires_real_exec_handler_then_self_stops(
     assert res["ok"] and psutil.pid_exists(res["pid"])
 
     trigger.touch()  # the real daemon's next probe run now returns fire=true
-    assert poll_until(lambda: store.read_jsonl(store.fires_path(res["watch_id"])))
-    assert store.read_jsonl(store.fires_path(res["watch_id"]))[-1]["status"] == "completed"
+    assert poll_until(lambda: _completed(res["watch_id"]))
+    assert store.recent_fires(res["watch_id"])[0]["status"] == "completed"
     assert marker.exists() and "probe_id" in marker.read_text()  # probe payload reached runbook
     assert poll_until(lambda: store.read_watch(res["watch_id"]).status == "stopped")  # max_fires=1
 
@@ -155,4 +161,4 @@ def test_smoke_public_api_monitor_fires_once_and_cleans_up(smoke_home, exec_runb
 
     assert poll_until(lambda: store.read_watch(res["watch_id"]).status == "stopped", timeout=20)
     assert marker.exists()
-    assert store.read_jsonl(store.fires_path(res["watch_id"]))[-1]["status"] == "completed"
+    assert store.recent_fires(res["watch_id"])[0]["status"] == "completed"

@@ -1,7 +1,8 @@
 import pytest
 
-from picket import runbooks, store
-from picket.models import InvalidSpec
+from picket.core.models import InvalidSpec
+from picket.execution import runbooks
+from picket.persistence import store
 
 
 def _make_runbook(home, runbook_id="notify", entry="run.sh", body="#!/bin/sh\necho hi\n"):

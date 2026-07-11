@@ -4,7 +4,7 @@ import os
 import psutil
 from fastmcp import Client
 
-from picket.server import mcp
+from picket.mcp.server import mcp
 
 
 def _call(tool: str, **args):
@@ -20,8 +20,19 @@ def test_ping_returns_well_formed_dict():
     assert result.data == {"ok": True, "service": "picket", "version": "0.1.0"}
 
 
+def test_doctor_tool_reports_readiness(home):
+    data = _call("doctor").data
+    assert "claude_on_path" in data and data["picket_home"] == str(home)
+    assert data["db"].endswith("picket.db") and data["home_writable"] is True
+
+
+def test_reconcile_tool_runs(home):
+    data = _call("reconcile").data
+    assert data["ok"] and data["restarted"] == [] and "recovered" in data
+
+
 def test_test_predicate_tool_runs(monkeypatch):
-    from picket import condition
+    from picket.conditions import condition
 
     monkeypatch.setattr(condition, "fetch", lambda ep, **k: {"last": 4700})
     result = _call(
@@ -47,7 +58,9 @@ def test_test_predicate_tool_rejects_bad_spec():
 
 def test_v0_walking_skeleton_end_to_end(home, monkeypatch):
     """register -> arm -> list -> get -> stop, end to end across the MCP tools."""
-    from picket import condition, daemon, store
+    from picket.conditions import condition
+    from picket.persistence import store
+    from picket.runtime import daemon
 
     d = home / "runbooks" / "notify"
     d.mkdir(parents=True)

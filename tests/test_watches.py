@@ -5,8 +5,11 @@ import time
 
 import psutil
 
-from picket import condition, daemon, runbooks, store, watches
-from picket.models import CadenceSpec, EndpointSpec, PredicateSpec, WatchState
+from picket.conditions import condition
+from picket.core.models import CadenceSpec, EndpointSpec, PredicateSpec, WatchState
+from picket.execution import runbooks
+from picket.persistence import store
+from picket.runtime import daemon, watches
 
 EP = {"url": "https://x/spx"}
 PR = {"path": "$.last", "op": "lt", "value": 4800}
@@ -141,7 +144,7 @@ def test_get_watch_returns_state_and_recent_fire(home, monkeypatch):
     watch_id = watches.arm_watch(runbook_id="rb", endpoint=EP, predicate=PR, cadence=CAD)[
         "watch_id"
     ]
-    store.append_jsonl(store.fires_path(watch_id), {"fire_id": "fire_1", "status": "completed"})
+    store.create_fire("fire_1", watch_id, "completed")
 
     res = watches.get_watch(watch_id)
     assert res["watch"]["watch_id"] == watch_id
@@ -169,12 +172,12 @@ def test_stop_watch_not_found(home):
     assert watches.stop_watch("wch_nope")["error_code"] == "NOT_FOUND"
 
 
-def test_pause_and_resume_write_control(home):
+def test_pause_and_resume_enqueue_commands(home):
     store.write_watch(_state("wch_p", status="active"))
     assert watches.pause_watch("wch_p")["requested"] == "pause"
-    assert store.control_path("wch_p").read_text() == "pause"
+    assert store.poll_command("wch_p")[1] == "pause"
     assert watches.resume_watch("wch_p")["requested"] == "resume"
-    assert store.control_path("wch_p").read_text() == "resume"
+    assert store.poll_command("wch_p")[1] == "resume"  # newest unacked wins
 
 
 def test_pause_rejects_stopped_watch(home):

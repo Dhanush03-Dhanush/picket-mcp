@@ -10,11 +10,13 @@ dependencies = [
     "httpx>=0.27",
     "jsonpath-ng>=1.6",
     "psutil>=5.9",
+    "pydantic>=2",
     "tomli-w>=1.0",
 ]
 
 [project.scripts]
-picket = "picket.server:main"
+picket = "picket.mcp.server:main"
+picket-supervisor = "picket.runtime.supervisor:main"
 
 [dependency-groups]
 dev = ["ruff>=0.6", "pytest>=8"]
@@ -38,6 +40,7 @@ select = ["E", "F", "I", "B", "UP"]
 testpaths = ["tests"]
 markers = [
     "smoke: real-process smoke tests (opt-in; run with -m smoke)",
+    "stress: real-process stress/durability tests (opt-in; run with -m stress)",
     "claude_smoke: smoke tests that launch a real claude -p (opt-in, spends tokens)",
 ]
-addopts = "-m 'not smoke and not claude_smoke'"
+addopts = "-m 'not smoke and not stress and not claude_smoke'"

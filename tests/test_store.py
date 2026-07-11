@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from picket import store
-from picket.models import CadenceSpec, EndpointSpec, PredicateSpec, WatchState
+from picket.core.models import CadenceSpec, EndpointSpec, PredicateSpec, WatchState
+from picket.persistence import store
 
 
 def _sample_state() -> WatchState:
@@ -60,9 +60,14 @@ def test_append_log_rotates_when_capped(home):
     assert log.read_text().strip() == "second line"
 
 
-def test_atomic_write_leaves_no_temp_and_overwrites(home):
-    path = home / "watches" / "wch_test.json"
+def test_write_watch_upserts_and_atomic_json_leaves_no_temp(home):
     store.write_watch(_sample_state())
-    store.write_watch(_sample_state())  # overwrite
-    assert store.read_json(path)["watch_id"] == "wch_test"
-    assert list((home / "watches").glob("*.tmp")) == []
+    store.write_watch(_sample_state())  # overwrite -> single row (upsert)
+    assert store.read_watch("wch_test").watch_id == "wch_test"
+    assert store.all_watch_ids() == ["wch_test"]
+
+    store.ensure_root()
+    path = home / "results" / "r.json"
+    store.write_json_atomic(path, {"k": 1})
+    assert store.read_json(path) == {"k": 1}
+    assert list((home / "results").glob("*.tmp")) == []

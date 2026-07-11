@@ -1,7 +1,7 @@
 import pytest
 
-from picket import probes
-from picket.models import InvalidSpec
+from picket.conditions import probes
+from picket.core.models import InvalidSpec
 
 FIRE = "import json\nprint(json.dumps({'fire': True, 'value': 5, 'payload': {'k': 'v'}}))\n"
 NO_FIRE = "import json\nprint(json.dumps({'fire': False, 'value': 5}))\n"

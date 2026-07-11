@@ -1,8 +1,8 @@
 import httpx
 import pytest
 
-from picket import condition
-from picket.models import EndpointSpec, PredicateSpec
+from picket.conditions import condition
+from picket.core.models import EndpointSpec, PredicateSpec
 
 
 def _client(handler):

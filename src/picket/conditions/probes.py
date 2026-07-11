@@ -29,9 +29,9 @@ from typing import Any, Literal
 import tomli_w
 from pydantic import BaseModel
 
-from picket import store
-from picket.models import InvalidSpec
-from picket.runbooks import content_hash
+from picket.core.models import InvalidSpec
+from picket.execution.runbooks import content_hash
+from picket.persistence import store
 
 # Run by declared language rather than relying on a shebang + chmod (more robust,
 # and gives Python probes the picket venv's deps such as httpx).
@@ -119,11 +119,17 @@ def list_probes() -> list[dict]:
     return out
 
 
-def has_drifted(probe: Probe) -> bool:
-    """Re-hash the entry (+ scripts/) and compare to the value stored at registration."""
-    if not probe.content_hash:
+def has_drifted(probe: Probe, expected_hash: str | None = None) -> bool:
+    """Re-hash the entry (+ scripts/) and compare to the hash pinned at arm time.
+
+    ``expected_hash`` is the watch's pinned ``probe_rev``; falling back to the
+    registration hash keeps back-compat. Comparing against the *pinned* value is
+    what stops a re-registered probe from silently retargeting existing watches.
+    """
+    expected = expected_hash or probe.content_hash
+    if not expected:
         return False
-    return content_hash(store.probe_dir(probe.id), probe.entry) != probe.content_hash
+    return content_hash(store.probe_dir(probe.id), probe.entry) != expected
 
 
 def run_probe(
@@ -176,11 +182,15 @@ def _parse_verdict(stdout: str) -> ProbeResult:
         raise ProbeError(f"probe stdout is not JSON: {err}") from err
     if not isinstance(verdict, dict):
         raise ProbeError("probe stdout must be a JSON object")
-    return ProbeResult(
-        fire=bool(verdict.get("fire")),
-        value=verdict.get("value"),
-        payload=verdict.get("payload") or {},
-    )
+    fire = verdict.get("fire")
+    if isinstance(fire, str):  # a JSON string like "false" is NOT truthy here
+        fire = fire.strip().lower() not in ("", "false", "0", "no")
+    else:
+        fire = bool(fire)
+    payload = verdict.get("payload") or {}
+    if not isinstance(payload, dict):
+        raise ProbeError("probe 'payload' must be a JSON object")
+    return ProbeResult(fire=fire, value=verdict.get("value"), payload=payload)
 
 
 def observe(state: Any) -> ProbeResult:
@@ -188,8 +198,8 @@ def observe(state: Any) -> ProbeResult:
     probe = read_probe(state.probe_id)
     if probe is None:
         raise ProbeError(f"probe {state.probe_id!r} is not registered")
-    if state.drift_policy == "block" and has_drifted(probe):
-        raise ProbeError("PROBE_DRIFT: probe entry changed since registration")
+    if state.drift_policy == "block" and has_drifted(probe, state.probe_rev):
+        raise ProbeError("PROBE_DRIFT: probe entry changed since arm")
     return run_probe(
         probe, state.probe_params, last_value=state.last_value, watch_id=state.watch_id
     )

@@ -7,7 +7,10 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
-from picket import probes, runbooks, store, watches
+from picket.conditions import probes
+from picket.execution import runbooks
+from picket.persistence import store
+from picket.runtime import watches
 
 
 @pytest.fixture
@@ -51,8 +54,8 @@ def smoke_home(home):
     store.ensure_root()
     yield home
     watches.stop_all_watches(confirm=True, status_filter="all", mode="immediate")
-    for path in (home / "watches").glob("*.json"):
-        state = store.read_watch(path.stem)
+    for watch_id in store.all_watch_ids():
+        state = store.read_watch(watch_id)
         if state and state.pgid:
             try:
                 os.killpg(state.pgid, signal.SIGKILL)

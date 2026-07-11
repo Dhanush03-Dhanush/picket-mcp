@@ -7,21 +7,13 @@ second from the daemon's poll/debug log at logs/<id>.log.
 
 from __future__ import annotations
 
-from picket import store
-from picket.errors import ErrorCode, failure
+from picket.core.errors import ErrorCode, failure
+from picket.persistence import store
 
 
 def get_fire_log(watch_id: str | None = None, limit: int = 20) -> dict:
-    """Most recent fire records, across all watchers if watch_id is omitted."""
-    if watch_id:
-        files = [store.fires_path(watch_id)]
-    else:
-        files = sorted((store.picket_home() / "fires").glob("*.jsonl"))
-    records: list[dict] = []
-    for path in files:
-        records.extend(store.read_jsonl(path))
-    records.sort(key=lambda r: r.get("started_at") or "", reverse=True)
-    return {"ok": True, "fires": records[:limit]}
+    """Most recent fire records (indexed query), across all watchers if omitted."""
+    return {"ok": True, "fires": store.recent_fires(watch_id, limit)}
 
 
 def tail_watch_log(watch_id: str, lines: int = 50) -> dict:
