@@ -1,21 +1,3 @@
-"""Durable store: stdlib SQLite (WAL) for operational state, files for content.
-
-The on-disk root (default ``~/.claude/picket``, override with ``PICKET_HOME``)::
-
-    $PICKET_HOME/
-      picket.db            SQLite (WAL): watches, fires ledger, commands, meta
-      runbooks/<id>/       human-placed runbook files + runbook.toml
-      probes/<id>/         human-placed probe script + probe.toml
-      logs/<id>.log        rotating poll/debug log (daemon-owned)
-      results/<fire>.json  durable structured result artifact, one per fire
-
-SQLite holds the mutable operational state that actually needs transactions,
-worker leases, acknowledged control commands, indexed audit queries and schema
-migrations — with no server to stand up (it is a single file). Runbooks, probes,
-logs and results stay ordinary inspectable files. Every id used as a path
-component is validated (:func:`safe_id`) so it can never escape the root.
-"""
-
 from __future__ import annotations
 
 import json
@@ -129,12 +111,9 @@ def ensure_root() -> Path:
         pass
     for sub in SUBDIRS:
         (home / sub).mkdir(parents=True, exist_ok=True, mode=0o700)
-    with _connect():  # triggers the lazy migration below
+    with _connect():
         pass
     return home
-
-
-# --- content-file paths (validated ids) ------------------------------------
 
 
 def runbook_dir(runbook_id: str) -> Path:
@@ -159,9 +138,6 @@ def new_watch_id() -> str:
 
 def new_fire_id() -> str:
     return f"fire_{uuid.uuid4().hex[:12]}"
-
-
-# --- SQLite connection + migrations ----------------------------------------
 
 
 _MIGRATED: set[str] = set()
@@ -203,9 +179,6 @@ def _migrate(conn: sqlite3.Connection) -> None:
         )
 
 
-# --- watches ---------------------------------------------------------------
-
-
 def write_watch(state: WatchState) -> None:
     """Upsert the full watch state (single-row source of truth per watch)."""
     with _connect() as conn:
@@ -241,9 +214,6 @@ def watch_ids_by_desired(desired: str) -> list[str]:
             "SELECT watch_id FROM watches WHERE desired=? ORDER BY watch_id", (desired,)
         ).fetchall()
     return [r["watch_id"] for r in rows]
-
-
-# --- fires: the durable ledger ---------------------------------------------
 
 
 def create_fire(
@@ -486,9 +456,6 @@ def is_command_acked(watch_id: str, generation: int) -> bool:
             (watch_id, generation),
         ).fetchone()
     return bool(row and row["acked_at"])
-
-
-# --- generic file helpers (results artifacts, params) ----------------------
 
 
 def write_json_atomic(path: Path, obj: Any) -> None:

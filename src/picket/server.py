@@ -1,10 +1,3 @@
-"""Picket control plane — a FastMCP stdio server (§4A).
-
-Fast request/response only: it arms/inspects/controls watchers but never polls
-and never hosts the wait loop. Tools are thin adapters over the picket modules;
-the logic they call is unit-tested directly.
-"""
-
 from __future__ import annotations
 
 import os

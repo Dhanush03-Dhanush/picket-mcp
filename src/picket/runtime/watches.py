@@ -1,14 +1,3 @@
-"""Watch lifecycle: arm, list, inspect, control, stop.
-
-arm_watch validates, does one trial fetch/probe (capturing the baseline), pins
-the runbook/probe **content revision** so a later re-registration can't silently
-retarget the watch, persists the durable state, spawns the detached daemon, and
-reads back its identity. One-shot is the default; recurrence is an explicit
-``recurring=true`` opt-in. Liveness and stop use verify-before-kill (pid present
-AND psutil create_time matches) to guard against PID reuse; an immediate stop
-also cancels the in-flight handler so it can't outlive the reported terminal.
-"""
-
 from __future__ import annotations
 
 import os
@@ -48,13 +37,13 @@ def is_alive(state: WatchState) -> bool:
         return False
     if state.proc_create_time is not None:
         if abs(proc.create_time() - state.proc_create_time) > 1.0:
-            return False  # pid was reused by a different process
+            return False
     return True
 
 
 def _heartbeat_stale(state: WatchState) -> bool:
     if state.heartbeat_at is None:
-        return False  # just armed; the daemon hasn't ticked yet
+        return False
     age = (datetime.now(UTC) - datetime.fromisoformat(state.heartbeat_at)).total_seconds()
     return age > max(60, 3 * state.cadence.interval_seconds)
 
@@ -145,7 +134,7 @@ def arm_watch(
         except ObserveError as err:
             return failure(ErrorCode.ENDPOINT_UNREACHABLE, str(err))
 
-    if max_fires is None:  # safe default: one-shot; recurrence is an explicit opt-in
+    if max_fires is None:
         max_fires = None if recurring else 1
 
     watch_id = store.new_watch_id()

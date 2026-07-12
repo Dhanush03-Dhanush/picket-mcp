@@ -1,15 +1,3 @@
-"""The handler: execute one runbook for a durable fire, record it, then deliver.
-
-A fire row exists in the ledger (status ``running``) *before* the runbook
-launches, so a crash mid-flight leaves a durable record with a stable
-idempotency key rather than a silent side effect. ``run_fire`` drift-checks
-against the revision pinned at arm, launches a scoped ``claude -p`` (prompt) or
-the script (exec) with retry/backoff, writes the full output to
-``results/<fire_id>.json``, transitions the fire to a terminal status, and runs
-the delivery sink for any subscribed outcome — success included, which closes
-the "watch → act → tell me" loop.
-"""
-
 from __future__ import annotations
 
 import json
@@ -30,7 +18,7 @@ from picket.persistence import store
 from picket.persistence.store import now_iso
 
 _TRANSCRIPT_TAIL = 2000
-_RESULT_MAX = 256_000  # bound the stored result artifact
+_RESULT_MAX = 256_000
 
 
 @dataclass
@@ -103,7 +91,7 @@ def build_payload(
     }
     if state.probe_id:
         payload["probe_id"] = state.probe_id
-        for k, v in (extra or {}).items():  # untrusted: may add, must not overwrite core
+        for k, v in (extra or {}).items():
             payload.setdefault(k, v)
     else:
         payload["predicate"] = state.predicate.model_dump()
@@ -111,8 +99,6 @@ def build_payload(
     return payload
 
 
-# Guardrails for the skip-permissions path. They MUST be --disallowedTools:
-# --allowedTools is ignored under bypassPermissions.
 DEFAULT_DISALLOWED = ["Bash(rm:*)", "Bash(curl:*)", "Bash(sudo:*)"]
 
 
@@ -137,9 +123,9 @@ def handler_command(
         "--add-dir",
         str(store.runbook_dir(rb.id)),
     ]
-    if skip_permissions:  # consciously trusted: bypass prompts, defend with deny-list
+    if skip_permissions:
         return cmd + ["--dangerously-skip-permissions", "--disallowedTools", *DEFAULT_DISALLOWED]
-    cmd += ["--permission-mode", "dontAsk"]  # default: deny-by-default allowlist
+    cmd += ["--permission-mode", "dontAsk"]
     if rb.allowed_tools:
         cmd += ["--allowedTools", *rb.allowed_tools]
     return cmd

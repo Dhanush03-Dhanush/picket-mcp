@@ -1,10 +1,3 @@
-"""Audit queries (§12.10/§12.11/§14): "did it fire and what happened?" and
-"is it even observing?".
-
-get_fire_log answers the first from fires/<id>.jsonl; tail_watch_log answers the
-second from the daemon's poll/debug log at logs/<id>.log.
-"""
-
 from __future__ import annotations
 
 from picket.core.errors import ErrorCode, failure

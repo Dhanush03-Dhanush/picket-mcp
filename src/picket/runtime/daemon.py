@@ -1,21 +1,3 @@
-"""The runtime: one detached daemon per active watcher, split into two roles.
-
-Run as ``python -m picket.runtime.daemon <watch_id>``. It double-forks + setsid so
-closing the arming session doesn't SIGHUP it, then runs two cooperating parts:
-
-* the **scheduler** (main thread) polls on the cadence, evaluates the condition,
-  and — on the unsatisfied→satisfied edge — records a *durable pending fire* in
-  the SQLite ledger. It is the sole writer of the watch row and never blocks on a
-  handler.
-* the **worker** (:class:`Worker`) leases pending fires from the ledger and
-  executes them, so a ten-minute runbook can never pause polling. A crash leaves
-  the fire leased; a later start reclaims the abandoned lease (at-most-once).
-
-Stop is acknowledged: a ``stop`` command drains (graceful) or cancels (immediate)
-the worker, then records the terminal status. Pure Python in the wait loop — no
-model runs while it waits.
-"""
-
 from __future__ import annotations
 
 import json
@@ -53,7 +35,7 @@ def in_active_window(cadence: CadenceSpec, now: datetime | None = None) -> bool:
     t = now.strftime("%H:%M")
     if window.start <= window.end:
         return window.start <= t <= window.end
-    return t >= window.start or t <= window.end  # window wraps past midnight
+    return t >= window.start or t <= window.end
 
 
 def _gates_open(state: WatchState, now: str) -> bool:
@@ -79,15 +61,15 @@ def poll_once(state: WatchState) -> WatchState:
     state.last_observed_at = now
     probe_payload = None
     try:
-        if state.probe_id:  # condition source B: the probe owns the decision
+        if state.probe_id:
             result = probes.observe(state)
             value, now_satisfied, probe_payload = result.value, result.fire, result.payload
-        else:  # condition source A: fetch + extract + predicate
+        else:
             data = condition.fetch(state.endpoint)
             value = condition.extract(data, state.predicate.path)
             now_satisfied = condition.is_satisfied(state.predicate, value, state.baseline)
     except (ObserveError, probes.ProbeError) as err:
-        state.last_error = str(err)  # could-not-observe != change: never fires
+        state.last_error = str(err)
         _log(state, f"observe-error: {err}")
         store.write_watch(state)
         return state
@@ -95,36 +77,41 @@ def poll_once(state: WatchState) -> WatchState:
     state.last_value = value
     state.last_error = None
     _log(state, f"observed {value!r} satisfied={now_satisfied}")
-    if now_satisfied and not state.satisfied:  # rising edge starts an episode
+    if now_satisfied and not state.satisfied:
         state.satisfied_since = now
         state.fired_this_episode = False
         state.episode_seq += 1
-    if not now_satisfied:  # episode ended; re-arm
+    if not now_satisfied:
         state.satisfied_since = None
         state.fired_this_episode = False
 
     if now_satisfied and not state.fired_this_episode and _gates_open(state, now):
-        if store.has_active_fire(state.watch_id):  # overlap_policy=drop
+        if store.has_active_fire(state.watch_id):
             _log(state, "skipped_overlap: a fire is already pending/running")
             handler.record_skipped_overlap(state)
         else:
             fire_id = store.new_fire_id()
-            idem = f"{state.watch_id}:{state.episode_seq}"  # stable per episode
+            idem = f"{state.watch_id}:{state.episode_seq}"
             if store.create_fire(
-                fire_id, state.watch_id, "pending", runbook_id=state.runbook_id,
-                idem_key=idem, value=value, payload=probe_payload,
-            ):  # fmt: skip
+                fire_id,
+                state.watch_id,
+                "pending",
+                runbook_id=state.runbook_id,
+                idem_key=idem,
+                value=value,
+                payload=probe_payload,
+            ):
                 _log(state, f"FIRE queued {fire_id} -> runbook {state.runbook_id}")
                 state.last_fire_at = now
         state.fired_this_episode = True
         if state.predicate and state.predicate.op == "on_change":
-            state.baseline = value  # re-arm against the new value
+            state.baseline = value
             now_satisfied = False
             state.satisfied_since = None
 
     if state.predicate and state.predicate.op == "pct_change":
         if state.predicate.baseline_mode == "last_value":
-            state.baseline = value  # track the prior poll for per-interval % change
+            state.baseline = value
     state.satisfied = now_satisfied
     state.fire_count = store.count_fires(state.watch_id)
     store.write_watch(state)
@@ -154,12 +141,12 @@ class Worker(threading.Thread):
                 )
                 if claimed is None:
                     if self._drain.is_set():
-                        return  # graceful drain: nothing left to run
+                        return
                     self._cancel.wait(self._poll)
                     continue
                 self._execute(state, claimed)
-            except Exception:  # a worker must never die and silently strand the watch's queue
-                self._cancel.wait(self._poll)  # transient (e.g. DB lock): back off, keep draining
+            except Exception:
+                self._cancel.wait(self._poll)
 
     def _execute(self, state: WatchState, claimed: dict) -> None:
         fire_id = claimed["fire_id"]
@@ -176,10 +163,14 @@ class Worker(threading.Thread):
             value = json.loads(claimed["value"]) if claimed["value"] else None
             extra = json.loads(claimed["payload"]) if claimed["payload"] else None
             handler.run_fire(
-                state, value, fire_id,
-                timeout=state.handler_timeout_seconds, payload_extra=extra, on_start=on_start,
-            )  # fmt: skip
-        except Exception as err:  # finalize so a handler bug never strands the fire as 'running'
+                state,
+                value,
+                fire_id,
+                timeout=state.handler_timeout_seconds,
+                payload_extra=extra,
+                on_start=on_start,
+            )
+        except Exception as err:
             store.finish_fire(fire_id, "failed", error=f"worker error: {err}"[:500])
         finally:
             with self._lock:
@@ -229,7 +220,7 @@ def run(
     if state is None:
         return
     _record_identity(state)
-    store.recover_abandoned(watch_id)  # crash recovery: fail leases abandoned by a crash
+    store.recover_abandoned(watch_id)
     if state.status in ("stopping", "errored"):
         state.status = "active"
     store.write_watch(state)
@@ -261,7 +252,7 @@ def run(
                     break
 
                 if state.status == "paused" or not in_active_window(state.cadence):
-                    state.heartbeat_at = now_iso()  # stay alive, do not poll
+                    state.heartbeat_at = now_iso()
                     store.write_watch(state)
                 else:
                     poll_once(state)
@@ -271,7 +262,7 @@ def run(
                     ):
                         stopped = True
                         break
-            except Exception as err:  # transient store/DB error: skip this tick, stay alive
+            except Exception as err:
                 _safe_log(watch_id, f"loop-error: {err}")
 
             n += 1

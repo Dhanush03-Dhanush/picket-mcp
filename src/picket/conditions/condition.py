@@ -1,10 +1,3 @@
-"""The deterministic core (§8/§10): fetch + extract + predicate evaluation.
-
-Pure Python, no model in the loop — this is why waiting is free. A failure to
-*observe* (network/timeout/decode/missing field) is never a fire: it raises
-:class:`ObserveError`, which the daemon records as ``last_error`` and skips.
-"""
-
 from __future__ import annotations
 
 import json
@@ -154,8 +147,6 @@ def run_test_predicate(endpoint: EndpointSpec, predicate: PredicateSpec) -> dict
     except ObserveError as err:
         return _result(would_fire=False, response_excerpt=excerpt, extract_error=str(err))
 
-    # Evaluate against the baseline arm would capture, so a dry run of a stateful
-    # op (pct_change / on_change) reflects the real first-poll decision.
     try:
         baseline = initial_baseline(predicate, value, data)
         satisfied = is_satisfied(predicate, value, baseline=baseline)
