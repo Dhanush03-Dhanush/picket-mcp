@@ -83,7 +83,7 @@ ordinary inspectable files.
 
 | Process | What it is | Role |
 | --- | --- | --- |
-| **Control plane** | the FastMCP stdio server (`picket.mcp.server`) | Fast request/response: arm / inspect / pause / stop / audit / reconcile. Never polls, never hosts the wait. May die with the session — nothing is lost; state is durable. |
+| **Control plane** | the FastMCP stdio server (`picket.server`) | Fast request/response: arm / inspect / pause / stop / audit / reconcile. Never polls, never hosts the wait. May die with the session — nothing is lost; state is durable. |
 | **Runtime** | one detached daemon per active watcher (`python -m picket.runtime.daemon <id>`) | double-fork + `setsid`. A **scheduler** thread polls and, on the condition edge, writes a *durable pending fire*; a **worker** thread leases and executes it, so a long handler never blocks polling. Pure Python — no model in the loop. |
 | **Handler** | an ephemeral headless `claude -p` (or a script, for `exec` runbooks) | Runs one runbook and exits. The worker supervises it: timeout, retry, dead-letter, result artifact, delivery. |
 | **Supervisor** *(optional)* | `picket-supervisor` reconcile loop | Restarts daemons for watches that should be active but died (crash/reboot), recovers fires abandoned by a crashed worker, prunes old results. Wire it to launchd/systemd — or call the `reconcile` tool on demand. |

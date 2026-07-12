@@ -15,7 +15,7 @@ dependencies = [
 ]
 
 [project.scripts]
-picket = "picket.mcp.server:main"
+picket = "picket.server:main"
 picket-supervisor = "picket.runtime.supervisor:main"
 
 [dependency-groups]
