@@ -1,9 +1,3 @@
-"""Standard failure envelope and error codes (§12).
-
-Every tool returns either a success dict (``{"ok": True, ...}``) or the failure
-envelope produced by :func:`failure`.
-"""
-
 from __future__ import annotations
 
 from enum import StrEnum
@@ -20,7 +14,6 @@ class ErrorCode(StrEnum):
     ENDPOINT_UNREACHABLE = "ENDPOINT_UNREACHABLE"
     ALREADY_STOPPED = "ALREADY_STOPPED"
     PROBE_NOT_FOUND = "PROBE_NOT_FOUND"
-    # arm-time trial run errored (the probe analog of ENDPOINT_UNREACHABLE)
     PROBE_FAILED = "PROBE_FAILED"
     PROBE_DRIFT = "PROBE_DRIFT"
 

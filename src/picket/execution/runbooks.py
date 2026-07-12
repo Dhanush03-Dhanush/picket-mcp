@@ -1,12 +1,3 @@
-"""Runbook model and registration (§7/§12.8/§12.9).
-
-A runbook is the unit of approved work. It lives under ``runbooks/<id>/`` and is
-referenced by id — its code is NEVER passed as a parameter. Two types: ``prompt``
-(an agentic ``claude -p`` job) and ``exec`` (a script run directly, no LLM).
-``content_hash`` is computed over the entry (+ a ``scripts/`` dir if present) so a
-fire-time re-hash can detect drift (NEW-12).
-"""
-
 from __future__ import annotations
 
 import hashlib
@@ -136,7 +127,7 @@ def list_runbooks() -> list[dict]:
     return out
 
 
-_TRIGGER_MAX = 4000  # size-bound untrusted trigger data rendered into the prompt
+_TRIGGER_MAX = 4000
 
 
 def render_prompt(template: str, payload: dict) -> str:
@@ -156,11 +147,11 @@ def render_prompt(template: str, payload: dict) -> str:
 class Invocation:
     """How to run a runbook, with the payload delivered via all three channels (§7)."""
 
-    kind: str  # "prompt" | "exec"
+    kind: str
     env: dict[str, str]
     payload_file: Path
     entry_path: Path
-    prompt_text: str | None  # rendered prompt for type=prompt; None for exec
+    prompt_text: str | None
 
 
 def prepare_invocation(rb: Runbook, payload: dict, workdir: Path) -> Invocation:

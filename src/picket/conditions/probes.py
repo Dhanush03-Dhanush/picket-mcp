@@ -1,19 +1,3 @@
-"""Probe model, registration, and execution (NEW-16/NEW-17).
-
-A *probe* is the generalized condition: a registered script the daemon runs on
-the watch cadence to decide whether to fire. Like a runbook it lives under
-``probes/<id>/`` and is referenced by id — its code is NEVER passed as a
-parameter. The script prints one JSON object on its last stdout line::
-
-    {"fire": true, "value": <any>, "payload": {...}}
-
-Exit 0 means evaluated; a non-zero exit, a timeout, or unparseable stdout is a
-:class:`ProbeError` — logged and never a fire (the ``ObserveError`` analog). The
-script receives ``probe_params`` via ``PICKET_PARAMS`` (+ a ``params.json`` file),
-the prior tick's value via ``PICKET_LAST_VALUE``, and ``PICKET_WATCH_ID``;
-secrets come from inherited env vars (the same auth_ref model as endpoints).
-"""
-
 from __future__ import annotations
 
 import json
@@ -33,10 +17,8 @@ from picket.core.models import InvalidSpec
 from picket.execution.runbooks import content_hash
 from picket.persistence import store
 
-# Run by declared language rather than relying on a shebang + chmod (more robust,
-# and gives Python probes the picket venv's deps such as httpx).
 _INTERPRETER = {"python": [sys.executable], "sh": ["/bin/sh"]}
-_PROBE_TIMEOUT = 30.0  # a probe runs every tick; it must be quick
+_PROBE_TIMEOUT = 30.0
 
 
 class Probe(BaseModel):

@@ -1,11 +1,3 @@
-"""Typed input specs and the durable watch record.
-
-These models are validated at the tool boundary, where a ``ValidationError``
-becomes an ``INVALID_SPEC`` failure. Validation is deliberately strict: a bad
-window, timezone, negative limit or non-observational HTTP method is rejected at
-arm time rather than being allowed to crash a detached daemon later.
-"""
-
 from __future__ import annotations
 
 import re
@@ -27,11 +19,8 @@ PredicateOp = Literal[
     "crosses_below",
 ]
 BaselineMode = Literal["last_value", "arm_time", "prior_close", "absolute"]
-# Polling is observation only: side-effecting methods are refused (a probe is the
-# escape hatch for anything that genuinely needs POST/custom logic).
 SAFE_METHODS = ("GET", "HEAD")
 _HHMM = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
-# Terminal fire outcomes a delivery sink can be subscribed to.
 DELIVERY_EVENTS = ("completed", "failed", "timed_out", "dead_lettered")
 
 
@@ -61,14 +50,7 @@ class EndpointSpec(BaseModel):
 
 
 class PredicateSpec(BaseModel):
-    """How to extract and test a value. ``op=on_change`` ignores ``value``.
-
-    For ``pct_change``, ``value`` is the signed % threshold (e.g. -2 = dropped 2%)
-    and ``baseline_mode`` says what to measure against: ``last_value`` (prior poll),
-    ``arm_time`` (value when armed), ``prior_close`` (``baseline_path`` extracted at
-    arm time), or ``absolute`` (``baseline_value``). Non-last_value baselines are
-    captured + persisted at arm time so a restart restores rather than recomputes.
-    """
+    """How to extract and test a value. ``op=on_change`` ignores ``value``."""
 
     path: str
     op: PredicateOp
@@ -133,53 +115,44 @@ WatchStatus = Literal["active", "paused", "stopping", "stopped", "errored"]
 
 
 class WatchState(BaseModel):
-    """The durable watch record (persisted as a row in SQLite).
+    """The durable watch record (persisted as a row in SQLite)."""
 
-    The spec/limits block is written once by the server at arm time; after the
-    daemon spawns it owns the observation and process-identity blocks. Limits are
-    validated here so a malformed value is rejected at arm, never mid-flight.
-    """
-
-    # spec + limits — written once by the server at arm time
     watch_id: str
     runbook_id: str
-    runbook_rev: str | None = None  # runbook content hash pinned at arm (immutability)
-    endpoint: EndpointSpec | None = None  # condition source A: HTTP poll + predicate
+    runbook_rev: str | None = None
+    endpoint: EndpointSpec | None = None
     predicate: PredicateSpec | None = None
-    probe_id: str | None = None  # condition source B: a probe script (mutually exclusive with A)
-    probe_rev: str | None = None  # probe content hash pinned at arm
+    probe_id: str | None = None
+    probe_rev: str | None = None
     probe_params: dict = Field(default_factory=dict)
     cadence: CadenceSpec
     label: str | None = None
     status: WatchStatus = "active"
-    desired_status: Literal["active", "paused", "stopped"] = "active"  # for the reconciler
-    max_fires: int | None = Field(default=1)  # one-shot by default; None = unbounded (opt-in)
+    desired_status: Literal["active", "paused", "stopped"] = "active"
+    max_fires: int | None = Field(default=1)
     ttl_seconds: float | None = None
     debounce_seconds: float = Field(default=0, ge=0)
     cooldown_seconds: float = Field(default=0, ge=0)
     handler_timeout_seconds: float = Field(default=600, gt=0)
     overlap_policy: Literal["drop"] = "drop"
-    max_retries: int = Field(default=0, ge=0)  # retries before dead-lettering
+    max_retries: int = Field(default=0, ge=0)
     drift_policy: Literal["block", "run"] = "block"
-    notify_runbook: str | None = None  # delivery sink (an exec runbook)
+    notify_runbook: str | None = None
     delivery_events: list[str] = Field(default_factory=lambda: list(DELIVERY_EVENTS))
     skip_permissions: bool = False
     created_at: str | None = None
-
-    # observation — written each loop by the daemon
     baseline: Any = None
     last_value: Any = None
     last_observed_at: str | None = None
     last_error: str | None = None
     satisfied: bool = False
-    satisfied_since: str | None = None  # episode start, for debounce
-    fired_this_episode: bool = False  # one fire per satisfied episode
-    episode_seq: int = 0  # increments each rising edge; part of the fire idempotency key
+    satisfied_since: str | None = None
+    fired_this_episode: bool = False
+    episode_seq: int = 0
     heartbeat_at: str | None = None
     fire_count: int = 0
     last_fire_at: str | None = None
 
-    # process identity — captured at spawn for verify-before-kill
     pid: int | None = None
     pgid: int | None = None
     proc_create_time: float | None = None

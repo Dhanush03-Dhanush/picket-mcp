@@ -1,14 +1,3 @@
-"""Supervisor: restore desired watches after crashes/reboots and recover fires.
-
-Picket normally needs no long-running service — ``arm`` spawns a detached daemon
-and you walk away. But a daemon can die (crash, OOM, reboot). The supervisor is
-an *optional* loop you wire to launchd/systemd (see the README) that periodically
-reconciles desired vs actual: it re-spawns a daemon for any watch whose
-``desired_status`` is ``active`` but whose daemon is gone, fails fires abandoned
-by a crashed worker (via their expired lease), and prunes old result artifacts.
-The same sweep is exposed as the ``reconcile`` MCP tool for on-demand use.
-"""
-
 from __future__ import annotations
 
 import sys
@@ -27,10 +16,10 @@ def reconcile(*, result_retention: int = 500) -> dict:
         state = store.read_watch(watch_id)
         if state is None or state.status not in ("active", "errored"):
             continue
-        if not watches.is_alive(state):  # daemon gone: bring it back
+        if not watches.is_alive(state):
             spawn(watch_id)
             restarted.append(watch_id)
-    recovered = store.recover_abandoned()  # global lease recovery
+    recovered = store.recover_abandoned()
     pruned = store.prune_results(keep=result_retention)
     return {"ok": True, "restarted": restarted, "recovered": recovered, "pruned": pruned}
 
@@ -39,7 +28,7 @@ def run_forever(interval: float = 30.0) -> None:
     while True:
         try:
             reconcile()
-        except Exception:  # a supervisor must never die on a transient error
+        except Exception:
             pass
         time.sleep(interval)
 
